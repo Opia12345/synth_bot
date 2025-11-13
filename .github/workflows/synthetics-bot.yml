@@ -2,8 +2,9 @@ name: Deriv Synthetics Trading Bot
 
 on:
   schedule:
-    # Run every 15 minutes (at minute 0, 15, 30, and 45 of every hour)
-    - cron: '*/15 * * * *'
+    # Run every 15 minutes, staggered to avoid peak congestion 
+    # Runs at :03, :18, :33, and :48 past the hour (UTC)
+    - cron: '3,18,33,48 * * * *'
   
   # Allow manual trigger
   workflow_dispatch:
@@ -29,6 +30,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
+        # Ensure pytz is installed for the WAT time check
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy requests websockets pytz

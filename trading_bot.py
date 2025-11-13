@@ -5,6 +5,7 @@ import socket
 from datetime import datetime
 from collections import deque
 import statistics
+import pytz # <-- ADDED FOR TIMEZONE HANDLING
 
 class DerivAccumulatorBot:
     def __init__(self, api_token="TzNY35kJ0wy78CI", app_id=110971):
@@ -385,9 +386,9 @@ class DerivAccumulatorBot:
                     print(f"\n❌ Monitoring Error: {data['error']['message']}")
                     # Unsubscribe if an error occurs
                     if data.get('echo_req', {}).get('proposal_open_contract'):
-                          forget_id = data.get("echo_req", {}).get('contract_id', contract_id)
-                          forget_request = {"forget": forget_id, "req_id": self.get_next_request_id()}
-                          await self.ws.send(json.dumps(forget_request))
+                            forget_id = data.get("echo_req", {}).get('contract_id', contract_id)
+                            forget_request = {"forget": forget_id, "req_id": self.get_next_request_id()}
+                            await self.ws.send(json.dumps(forget_request))
                     return None
 
             except asyncio.TimeoutError:
@@ -412,6 +413,29 @@ class DerivAccumulatorBot:
         print(f"📈 Growth Rate: {self.accumulator_range}")
         print(f"✅ Symbol: {self.symbol}")
         print("="*60 + "\n")
+        
+        # ----------------------------------------------------
+        # --- CORRECTED TIME CHECK LOGIC (using pytz for WAT) ---
+        # ----------------------------------------------------
+        try:
+            # Define the WAT time zone object (Africa/Lagos is standard for WAT, UTC+1)
+            wat_timezone = pytz.timezone('Africa/Lagos')
+            
+            # Get the current time, localized to WAT
+            current_time_wat = datetime.now(wat_timezone)
+            current_hour = current_time_wat.hour
+            
+            # Check if it's between 4:00 AM (inclusive) and 4:59 AM (inclusive) WAT
+            if current_hour == 4:
+                print(f"🚫 Current time is {current_time_wat.strftime('%H:%M:%S')} WAT. Skipping trade as it's within the restricted hour (4:00 AM - 4:59 AM WAT).")
+                await asyncio.sleep(5) 
+                return
+        except NameError:
+            # Fallback if pytz is not installed, but warns the user
+            print("⚠️  pytz library not found. Cannot guarantee WAT time zone. Exiting.")
+            await asyncio.sleep(5) 
+            return
+        # ----------------------------------------------------
         
         print("✅ Ready to trade! Starting single trade...\n")
         
@@ -493,6 +517,8 @@ if __name__ == "__main__":
     4. Past performance ≠ future results
     5. Never trade with money you can't afford to lose
     ==========================================
+    
+    NOTE: Time check now uses 'Africa/Lagos' (WAT) for accuracy on remote servers.
     """)
     
     asyncio.run(main())
