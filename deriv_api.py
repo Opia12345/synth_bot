@@ -1,21 +1,35 @@
-from flask import Flask, request, jsonify
-import asyncio
 import json
 import websockets
 from datetime import datetime
 from threading import Thread
 import uuid
+import asyncio
+import logging
+import traceback
 
-app = Flask(__name__)
+from flask import Flask, request, jsonify
+
+# --- Global Configuration ---
+# Set logging level to INFO. This suppresses any log messages using logging.DEBUG(), 
+# preventing the "output too large" error from external schedulers.
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # In-memory storage for trade results
 trade_results = {}
 
 class DerivAccumulatorBot:
-    def __init__(self, api_token, app_id):
+    def __init__(self, api_token, app_id, trade_id, parameters):
         """Initialize the Deriv Accumulator Bot"""
         self.api_token = api_token
         self.app_id = app_id
+        self.trade_id = trade_id
+        
+        # Trading parameters are set from the API request
+        self.stake_per_trade = parameters.get('stake', 10.0)
+        self.target_ticks = parameters.get('target_ticks', 1)
+        self.accumulator_range = parameters.get('growth_rate', 0.03)
+        self.symbol = parameters.get('symbol', '1HZ10V')
+        
         self.ws_urls = [
             f"wss://ws.derivws.com/websockets/v3?app_id={app_id}",
             f"wss://wscluster1.deriv.com/websockets/v3?app_id={app_id}",
@@ -24,18 +38,9 @@ class DerivAccumulatorBot:
         self.ws_url = self.ws_urls[0]
         self.ws = None
         self.request_id = 0
-        
-        # Bot Configuration 
-        self.stake_per_trade = 10.0
-        self.target_ticks = 1
-        self.accumulator_range = 0.03
-        self.symbol = "1HZ10V"
-        self.contract_type = "ACCU"
-        
-        # Trading state
         self.account_balance = 0.0
         self.symbol_available = False
-        self.trade_id = str(uuid.uuid4())
+        self.contract_type = "ACCU"
         
     def get_next_request_id(self):
         """Get next request ID for tracking responses"""
@@ -51,13 +56,14 @@ class DerivAccumulatorBot:
                     websockets.connect(self.ws_url),
                     timeout=15.0
                 )
-                print(f"✅ Connected to Deriv API")
+                # CRITICAL FIX: Replaced print() with logging.info()
+                logging.info(f"[{self.trade_id}] ✅ Connected to Deriv API via {self.ws_url}")
 
                 auth_success = await self.authorize()
                 if not auth_success:
                     await self.ws.close()
                     self.ws = None
-                    raise Exception("Authorization failed")
+                    raise Exception("Authorization failed or API token is invalid.")
                 
                 return True
                     
@@ -67,6 +73,7 @@ class DerivAccumulatorBot:
                     self.ws = None
                 continue
             except Exception as e:
+                logging.warning(f"[{self.trade_id}] Connection attempt failed: {e}")
                 if self.ws:
                     await self.ws.close()
                     self.ws = None
@@ -77,7 +84,7 @@ class DerivAccumulatorBot:
             await asyncio.sleep(wait_time)
             return await self.connect(retry_count=retry_count + 1, max_retries=max_retries)
         else:
-            raise Exception("Failed to connect to Deriv API")
+            raise Exception("Failed to connect to Deriv API after all retries.")
     
     async def authorize(self):
         """Authorize with API token"""
@@ -96,13 +103,19 @@ class DerivAccumulatorBot:
             data = json.loads(response)
             
         except asyncio.TimeoutError:
+            logging.error(f"[{self.trade_id}] Authorization response timeout.")
+            return False
+        except Exception as e:
+            logging.error(f"[{self.trade_id}] Authorization failed: {e}")
             return False
         
         if "error" in data:
+            logging.error(f"[{self.trade_id}] Authorization error: {data['error']['message']}")
             return False
         
         if "authorize" in data:
             self.account_balance = float(data['authorize']['balance'])
+            logging.info(f"[{self.trade_id}] Account authorized. Balance: {self.account_balance}")
             return True
         
         return False
@@ -110,17 +123,11 @@ class DerivAccumulatorBot:
     async def get_balance(self):
         """Get current account balance"""
         balance_request = {"balance": 1, "subscribe": 0, "req_id": self.get_next_request_id()}
-        await self.ws.send(json.dumps(balance_request))
+        response_data = await self.send_request(balance_request)
         
-        try:
-            response = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
-            data = json.loads(response)
-            
-            if "balance" in data:
-                self.account_balance = float(data["balance"]["balance"])
-                return self.account_balance
-        except asyncio.TimeoutError:
-            pass
+        if response_data and "balance" in response_data:
+            self.account_balance = float(response_data["balance"]["balance"])
+            return self.account_balance
         
         return self.account_balance
     
@@ -132,26 +139,25 @@ class DerivAccumulatorBot:
                 "req_id": self.get_next_request_id()
             }
             
-            await self.ws.send(json.dumps(spec_request))
-            response = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
-            data = json.loads(response)
+            response = await self.send_request(spec_request)
             
-            if "error" in data:
+            if not response or "error" in response:
+                logging.error(f"[{self.trade_id}] Symbol validation error: {response.get('error', {}).get('message', 'Unknown response')}")
                 return False
             
-            if "contracts_for" in data:
-                contracts = data["contracts_for"].get("available", [])
-                has_accu = any(c.get("contract_type") == "ACCU" for c in contracts) 
+            if "contracts_for" in response:
+                contracts = response["contracts_for"].get("available", [])
+                has_accu = any(c.get("contract_type") == self.contract_type for c in contracts) 
                 
                 if has_accu:
                     self.symbol_available = True
                     return True
                 else:
+                    logging.error(f"[{self.trade_id}] Symbol {self.symbol} available, but {self.contract_type} contract type is missing.")
                     return False
-                    
-        except asyncio.TimeoutError:
-            pass
+            
         except Exception as e:
+            logging.error(f"[{self.trade_id}] Error validating symbol: {e}")
             pass
         
         return False
@@ -164,6 +170,7 @@ class DerivAccumulatorBot:
         try:
             await self.ws.send(json.dumps(request))
         except Exception as e:
+            logging.error(f"[{self.trade_id}] WebSocket send failed: {e}")
             return None
         
         try:
@@ -175,31 +182,32 @@ class DerivAccumulatorBot:
                     return data
                     
                 if "subscription" in data:
+                    # Ignore subscription updates if we are waiting for a specific req_id
                     continue
                     
         except asyncio.TimeoutError:
+            logging.error(f"[{self.trade_id}] Response timeout for request ID {req_id}")
             return None
         except Exception as e:
+            logging.error(f"[{self.trade_id}] Response processing error: {e}")
             return None
 
     async def place_accumulator_trade(self):
         """Place an Accumulator trade"""
         balance = await self.get_balance()
-        if balance < self.stake_per_trade + 20.0:
-            return None, "Insufficient balance"
+        if balance < self.stake_per_trade:
+            return None, "Insufficient balance to place the trade."
         
         if not self.symbol_available:
             if not await self.validate_symbol():
-                return None, "Symbol validation failed"
-        
-        contract_type = "ACCU" 
+                return None, "Symbol validation failed."
         
         proposal_request = {
             "proposal": 1,
             "amount": self.stake_per_trade,
             "basis": "stake",
-            "contract_type": contract_type,
-            "currency": "USD",
+            "contract_type": self.contract_type,
+            "currency": "USD", # Assuming USD, adjust if necessary
             "symbol": self.symbol,
             "growth_rate": self.accumulator_range
         }
@@ -207,11 +215,8 @@ class DerivAccumulatorBot:
         proposal_response = await self.send_request(proposal_request)
         
         if not proposal_response or "error" in proposal_response:
-            error_msg = proposal_response.get("error", {}).get("message", "Unknown error") if proposal_response else "No response"
+            error_msg = proposal_response.get("error", {}).get("message", "Unknown proposal error") if proposal_response else "No proposal response"
             return None, f"Proposal Error: {error_msg}"
-        
-        if "proposal" not in proposal_response:
-            return None, "Invalid proposal response"
         
         proposal_id = proposal_response["proposal"]["id"]
         ask_price = proposal_response["proposal"]["ask_price"]
@@ -224,18 +229,16 @@ class DerivAccumulatorBot:
         buy_response = await self.send_request(buy_request)
         
         if not buy_response or "error" in buy_response:
-            error_msg = buy_response.get("error", {}).get("message", "Unknown error") if buy_response else "No response"
+            error_msg = buy_response.get("error", {}).get("message", "Unknown buy error") if buy_response else "No buy response"
             return None, f"Buy Error: {error_msg}"
         
-        if "buy" not in buy_response:
-            return None, "Invalid buy response"
-        
         contract_id = buy_response["buy"]["contract_id"]
+        logging.info(f"[{self.trade_id}] Trade placed. Contract ID: {contract_id}")
         
         return contract_id, None
     
     async def monitor_contract(self, contract_id):
-        """Monitor a contract until completion"""
+        """Monitor a contract until completion, selling after target_ticks"""
         req_id = self.get_next_request_id()
         proposal_request = {
             "proposal_open_contract": 1,
@@ -259,11 +262,14 @@ class DerivAccumulatorBot:
                     if contract.get("is_sold") or contract.get("status") == "sold":
                         profit = float(contract.get("profit", 0))
                         
+                        # Forget the subscription to clean up the connection
                         forget_request = {
-                            "forget": contract.get("subscription", {}).get("id", contract_id), 
+                            "forget": data.get("subscription", {}).get("id"),
                             "req_id": self.get_next_request_id()
                         }
                         await self.ws.send(json.dumps(forget_request))
+                        
+                        logging.info(f"[{self.trade_id}] Contract sold. Profit: {profit}")
                         
                         return {
                             "profit": profit,
@@ -271,18 +277,25 @@ class DerivAccumulatorBot:
                             "contract_id": contract_id
                         }
                     
-                    tick_count += 1
-                    current_profit = float(contract.get("profit", 0))
+                    # Only count ticks if entry spot is set (meaning contract is active)
+                    if contract.get("entry_spot"):
+                        tick_count += 1
+                    
+                    # CRITICAL FIX: Changed to logging.debug() to suppress verbose output
+                    logging.debug(f"[{self.trade_id}] Tick {tick_count}/{self.target_ticks}. Current profit: {contract.get('profit', 'N/A')}")
 
                     if tick_count >= self.target_ticks:
+                        logging.info(f"[{self.trade_id}] Target ticks ({self.target_ticks}) reached. Attempting to sell.")
                         sell_request = {
                             "sell": contract_id,
-                            "price": 0.0,
+                            "price": 0.0, # Sell at market price
                             "req_id": self.get_next_request_id()
                         }
                         await self.send_request(sell_request)
+                        # Continue loop to wait for the "is_sold" message
                         
                 elif "error" in data:
+                    logging.error(f"[{self.trade_id}] Monitoring error: {data['error']['message']}")
                     return {
                         "profit": 0,
                         "status": "error",
@@ -302,8 +315,10 @@ class DerivAccumulatorBot:
                     "error": str(e)
                 }
     
-    async def execute_trade(self):
-        """Execute a single trade and return results"""
+    async def execute_trade_async(self):
+        """Execute a single trade and return results, running inside a thread."""
+        trade_results[self.trade_id]['status'] = 'running'
+        
         try:
             await self.connect()
             
@@ -338,6 +353,8 @@ class DerivAccumulatorBot:
             }
             
         except Exception as e:
+            logging.critical(f"[{self.trade_id}] CRITICAL: Trade thread crashed with error: {e}")
+            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),
@@ -346,62 +363,85 @@ class DerivAccumulatorBot:
         finally:
             if self.ws:
                 await self.ws.close()
+            trade_results[self.trade_id]['status'] = 'completed'
 
 
-def run_async_trade(api_token, app_id, stake, target_ticks, growth_rate, symbol):
-    """Run async trade in a new event loop"""
+def run_async_trade_in_thread(api_token, app_id, stake, target_ticks, growth_rate, symbol, trade_id):
+    """
+    Thread target: Creates a new event loop and runs the async bot execution.
+    """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    bot = DerivAccumulatorBot(api_token, app_id)
-    bot.stake_per_trade = stake
-    bot.target_ticks = target_ticks
-    bot.accumulator_range = growth_rate
-    bot.symbol = symbol
+    parameters = {
+        'stake': stake,
+        'target_ticks': target_ticks,
+        'growth_rate': growth_rate,
+        'symbol': symbol
+    }
     
-    result = loop.run_until_complete(bot.execute_trade())
+    bot = DerivAccumulatorBot(api_token, app_id, trade_id, parameters)
+    result = loop.run_until_complete(bot.execute_trade_async())
     
-    # Store result
-    trade_results[result['trade_id']] = result
+    # Store result using the correct ID
+    trade_results[trade_id].update(result)
     
     loop.close()
-    return result
 
+
+app = Flask(__name__)
 
 @app.route('/trade/<app_id>/<api_token>', methods=['POST'])
 def execute_trade(app_id, api_token):
     """
     POST /trade/<app_id>/<api_token>
-    Execute a single accumulator trade
-    
-    Route Parameters:
-    - app_id (required): Deriv app ID
-    - api_token (required): Deriv API token
-    
-    JSON Body Parameters (optional):
-    - stake (optional): Stake amount per trade (default: 10.0)
-    - target_ticks (optional): Number of ticks before selling (default: 1)
-    - growth_rate (optional): Accumulator growth rate (default: 0.03)
-    - symbol (optional): Trading symbol (default: "1HZ10V")
+    Initiates a single accumulator trade in a non-blocking thread and immediately 
+    returns a 202 Accepted status.
     """
     try:
         # Get optional parameters from JSON body
-        data = request.json if request.json else {}
+        data = request.get_json(silent=True) or {}
         
         stake = float(data.get('stake', 10.0))
         target_ticks = int(data.get('target_ticks', 1))
         growth_rate = float(data.get('growth_rate', 0.03))
         symbol = data.get('symbol', '1HZ10V')
         
-        # Run trade in a separate thread to avoid blocking
-        result = run_async_trade(api_token, app_id, stake, target_ticks, growth_rate, symbol)
+        # 1. Generate unique trade ID
+        new_trade_id = str(uuid.uuid4())
         
-        return jsonify(result), 200 if result['success'] else 400
+        # 2. Store initial PENDING status
+        trade_results[new_trade_id] = {
+            "status": "pending", 
+            "timestamp": datetime.now().isoformat(),
+            "app_id": app_id,
+            "parameters": {'stake': stake, 'target_ticks': target_ticks, 'growth_rate': growth_rate, 'symbol': symbol}
+        }
+        
+        logging.info(f"[{new_trade_id}] Trade initiated via API. Starting background thread.")
+
+        # 3. Start the trade in a separate thread
+        thread = Thread(
+            target=run_async_trade_in_thread,
+            args=(api_token, app_id, stake, target_ticks, growth_rate, symbol, new_trade_id)
+        )
+        thread.daemon = True # Allows server to exit even if thread is running
+        thread.start()
+        
+        # 4. CRITICAL FIX: Return 202 ACCEPTED immediately to the cron job
+        return jsonify({
+            "status": "initiated",
+            "message": "Trade request accepted and is running in the background.",
+            "trade_id": new_trade_id,
+            "check_url": f"/trade/{new_trade_id}"
+        }), 202
         
     except Exception as e:
+        logging.error(f"Flask execution error: {e}")
+        traceback.print_exc()
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "Internal Server Error during initiation. Check Render logs."
         }), 500
 
 
@@ -410,37 +450,31 @@ def get_trade_result(trade_id):
     """
     GET /trade/<trade_id>
     Get the result of a specific trade
-    
-    Returns trade status, profit/loss, and details
     """
-    if trade_id not in trade_results:
+    result = trade_results.get(trade_id)
+    
+    if not result:
         return jsonify({
             "success": False,
             "error": "Trade ID not found"
         }), 404
     
-    result = trade_results[trade_id]
-    
     response = {
         "trade_id": trade_id,
-        "found": True
+        "status": result.get('status', 'unknown'),
+        "timestamp": result.get('timestamp')
     }
     
-    if result.get('success'):
+    if result.get('success') is not None:
         profit = result.get('profit', 0)
         response.update({
-            "status": result.get('status'),
+            "success": result.get('success'),
             "profit_loss": profit,
             "result": "PROFIT" if profit > 0 else "LOSS",
             "amount": abs(profit),
             "contract_id": result.get('contract_id'),
             "final_balance": result.get('final_balance'),
-            "timestamp": result.get('timestamp')
-        })
-    else:
-        response.update({
-            "status": "failed",
-            "error": result.get('error')
+            "error_details": result.get('error')
         })
     
     return jsonify(response), 200
@@ -469,6 +503,7 @@ def health_check():
 
 
 if __name__ == '__main__':
+    # Print warnings only when running locally for user safety
     print("""
     ⚠️  IMPORTANT WARNINGS:
     ==========================================
