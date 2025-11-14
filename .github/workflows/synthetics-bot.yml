@@ -1,41 +1,41 @@
-name: Deriv Synthetics Trading Bot
+# name: Deriv Synthetics Trading Bot
 
-on:
-  schedule:
-    # Run every 15 minutes (at minute 0, 15, 30, and 45 of every hour)
-    - cron: '*/15 * * * *'
+# on:
+#   schedule:
+#     # Run every 15 minutes (at minute 0, 15, 30, and 45 of every hour)
+#     - cron: '*/15 * * * *'
   
-  # Allow manual trigger
-  workflow_dispatch:
-    inputs:
-      run_now:
-        description: 'Run bot immediately'
-        required: false
-        default: 'true'
+#   # Allow manual trigger
+#   workflow_dispatch:
+#     inputs:
+#       run_now:
+#         description: 'Run bot immediately'
+#         required: false
+#         default: 'true'
 
-jobs:
-  run-bot:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+# jobs:
+#   run-bot:
+#     runs-on: ubuntu-latest
+#     timeout-minutes: 10
     
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+#     steps:
+#       - name: Checkout code
+#         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-          cache: 'pip'
+#       - name: Set up Python
+#         uses: actions/setup-python@v4
+#         with:
+#           python-version: '3.11'
+#           cache: 'pip'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy requests websockets pytz
+#       - name: Install dependencies
+#         run: |
+#           python -m pip install --upgrade pip
+#           pip install pandas numpy requests websockets pytz
 
-      - name: Run Synthetics Bot
-        run: |
-          python trading_bot.py
-          exit_code=$?
-          echo "Bot exit code: $exit_code"
-          exit $exit_code
+#       - name: Run Synthetics Bot
+#         run: |
+#           python trading_bot.py
+#           exit_code=$?
+#           echo "Bot exit code: $exit_code"
+#           exit $exit_code
