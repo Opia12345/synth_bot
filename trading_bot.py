@@ -22,15 +22,15 @@ class DerivAccumulatorBot:
         self.pending_requests = {}
         
         # Bot Configuration 
-        self.stake_per_trade = 20.0
+        self.stake_per_trade = 10.0
         self.daily_profit_target = 2.0
-        self.max_daily_loss = 20.0
+        self.max_daily_loss = 10.0
         self.target_ticks = 1        # <-- NEW: The number of ticks to wait before selling
         self.accumulator_range = 0.03 # <--- GROWTH RATE
         self.symbol = "1HZ10V"       # Volatility 10 (1s) Index
         self.contract_type = "ACCU"  # <--- Contract type is now ACCU
         
-        self.min_balance_buffer = 10.0
+        self.min_balance_buffer = 20.0
         
         # Trading state
         self.daily_profit = 0.0
