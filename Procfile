@@ -1,0 +1,1 @@
+web: gunicorn deriv_api:app
