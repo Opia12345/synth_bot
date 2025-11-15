@@ -159,6 +159,27 @@ def trade_completed():
     except:
         pass
 
+def delayed_restart(delay_seconds=60):
+    """Restart server after delay (clears memory/logs)"""
+    try:
+        import time
+        time.sleep(delay_seconds)
+        
+        # Trigger restart by calling Render API
+        render_api_key = os.environ.get('RENDER_API_KEY')
+        service_id = os.environ.get('RENDER_SERVICE_ID')
+        
+        if render_api_key and service_id:
+            import requests
+            url = f"https://api.render.com/v1/services/{service_id}/restarts"
+            headers = {
+                "Authorization": f"Bearer {render_api_key}",
+                "Content-Type": "application/json"
+            }
+            requests.post(url, headers=headers, timeout=10)
+    except:
+        pass
+
 class DerivAccumulatorBot:
     def __init__(self, api_token, app_id, trade_id, parameters):
         """Initialize the Deriv Accumulator Bot"""
@@ -511,6 +532,7 @@ def execute_trade(app_id, api_token):
         target_ticks = int(data.get('target_ticks', 1))
         growth_rate = float(data.get('growth_rate', 0.03))
         symbol = data.get('symbol', '1HZ10V')
+        auto_restart = data.get('auto_restart', False)  # New parameter
         
         new_trade_id = str(uuid.uuid4())
         initial_data = {
@@ -528,6 +550,11 @@ def execute_trade(app_id, api_token):
         )
         thread.daemon = True
         thread.start()
+        
+        # Optional: Schedule server restart after trade completes
+        if auto_restart:
+            restart_thread = Thread(target=delayed_restart, args=(60,), daemon=True)
+            restart_thread.start()
         
         return jsonify({"status": "initiated", "trade_id": new_trade_id}), 202
     except:
@@ -677,6 +704,48 @@ def health_check():
         "active_trades": active_trade_count,
         "max_concurrent": MAX_CONCURRENT_TRADES
     }), 200
+
+
+@app.route('/restart', methods=['POST'])
+def restart_service():
+    """Manual restart endpoint - clears logs and memory"""
+    try:
+        # Get API key from environment
+        render_api_key = os.environ.get('RENDER_API_KEY')
+        service_id = os.environ.get('RENDER_SERVICE_ID')
+        
+        if not render_api_key or not service_id:
+            return jsonify({
+                "success": False,
+                "error": "Render API credentials not configured"
+            }), 500
+        
+        # Call Render API to restart service
+        import requests as req
+        url = f"https://api.render.com/v1/services/{service_id}/restarts"
+        headers = {
+            "Authorization": f"Bearer {render_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        response = req.post(url, headers=headers, timeout=10)
+        
+        if response.status_code == 201:
+            return jsonify({
+                "success": True,
+                "message": "Server restart initiated"
+            }), 200
+        else:
+            return jsonify({
+                "success": False,
+                "error": f"Restart failed: {response.status_code}"
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
 @app.route('/dashboard', methods=['GET'])
