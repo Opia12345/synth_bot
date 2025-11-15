@@ -10,9 +10,10 @@ import traceback
 from flask import Flask, request, jsonify
 
 # --- Global Configuration ---
-# Set logging level to INFO. This suppresses any log messages using logging.DEBUG(), 
-# preventing the "output too large" error from external schedulers.
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# CRITICAL FIX: Set logging level to WARNING. This aggressively suppresses all 
+# INFO and DEBUG messages, ensuring minimal output to stdout for the cron job.
+# Only WARNING, ERROR, and CRITICAL messages will appear in the stream.
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # In-memory storage for trade results
 trade_results = {}
@@ -56,8 +57,8 @@ class DerivAccumulatorBot:
                     websockets.connect(self.ws_url),
                     timeout=15.0
                 )
-                # CRITICAL FIX: Replaced print() with logging.info()
-                logging.info(f"[{self.trade_id}] ✅ Connected to Deriv API via {self.ws_url}")
+                # CRITICAL: Replaced logging.info() with logging.debug() for connection messages
+                logging.debug(f"[{self.trade_id}] ✅ Connected to Deriv API via {self.ws_url}")
 
                 auth_success = await self.authorize()
                 if not auth_success:
@@ -71,6 +72,7 @@ class DerivAccumulatorBot:
                 if self.ws:
                     await self.ws.close()
                     self.ws = None
+                logging.warning(f"[{self.trade_id}] Connection attempt timed out.")
                 continue
             except Exception as e:
                 logging.warning(f"[{self.trade_id}] Connection attempt failed: {e}")
@@ -115,7 +117,8 @@ class DerivAccumulatorBot:
         
         if "authorize" in data:
             self.account_balance = float(data['authorize']['balance'])
-            logging.info(f"[{self.trade_id}] Account authorized. Balance: {self.account_balance}")
+            # CRITICAL: Replaced logging.info() with logging.debug() for balance messages
+            logging.debug(f"[{self.trade_id}] Account authorized. Balance: {self.account_balance}")
             return True
         
         return False
@@ -207,7 +210,7 @@ class DerivAccumulatorBot:
             "amount": self.stake_per_trade,
             "basis": "stake",
             "contract_type": self.contract_type,
-            "currency": "USD", # Assuming USD, adjust if necessary
+            "currency": "USD",
             "symbol": self.symbol,
             "growth_rate": self.accumulator_range
         }
@@ -233,7 +236,8 @@ class DerivAccumulatorBot:
             return None, f"Buy Error: {error_msg}"
         
         contract_id = buy_response["buy"]["contract_id"]
-        logging.info(f"[{self.trade_id}] Trade placed. Contract ID: {contract_id}")
+        # CRITICAL: Replaced logging.info() with logging.debug() for trade success message
+        logging.debug(f"[{self.trade_id}] Trade placed. Contract ID: {contract_id}")
         
         return contract_id, None
     
@@ -269,7 +273,7 @@ class DerivAccumulatorBot:
                         }
                         await self.ws.send(json.dumps(forget_request))
                         
-                        logging.info(f"[{self.trade_id}] Contract sold. Profit: {profit}")
+                        logging.debug(f"[{self.trade_id}] Contract sold. Profit: {profit}")
                         
                         return {
                             "profit": profit,
@@ -281,11 +285,11 @@ class DerivAccumulatorBot:
                     if contract.get("entry_spot"):
                         tick_count += 1
                     
-                    # CRITICAL FIX: Changed to logging.debug() to suppress verbose output
+                    # Log the tick progress using DEBUG level (guaranteed suppressed)
                     logging.debug(f"[{self.trade_id}] Tick {tick_count}/{self.target_ticks}. Current profit: {contract.get('profit', 'N/A')}")
 
                     if tick_count >= self.target_ticks:
-                        logging.info(f"[{self.trade_id}] Target ticks ({self.target_ticks}) reached. Attempting to sell.")
+                        logging.debug(f"[{self.trade_id}] Target ticks ({self.target_ticks}) reached. Attempting to sell.")
                         sell_request = {
                             "sell": contract_id,
                             "price": 0.0, # Sell at market price
@@ -353,6 +357,7 @@ class DerivAccumulatorBot:
             }
             
         except Exception as e:
+            # Only use CRITICAL/ERROR/WARNING for the job-ending messages
             logging.critical(f"[{self.trade_id}] CRITICAL: Trade thread crashed with error: {e}")
             traceback.print_exc()
             return {
@@ -370,6 +375,7 @@ def run_async_trade_in_thread(api_token, app_id, stake, target_ticks, growth_rat
     """
     Thread target: Creates a new event loop and runs the async bot execution.
     """
+    # Create a new event loop for this thread to run the async functions
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -418,7 +424,8 @@ def execute_trade(app_id, api_token):
             "parameters": {'stake': stake, 'target_ticks': target_ticks, 'growth_rate': growth_rate, 'symbol': symbol}
         }
         
-        logging.info(f"[{new_trade_id}] Trade initiated via API. Starting background thread.")
+        # We rely on the Render service logs for this. Suppress from stdout.
+        logging.debug(f"[{new_trade_id}] Trade initiated via API. Starting background thread.")
 
         # 3. Start the trade in a separate thread
         thread = Thread(
@@ -428,7 +435,7 @@ def execute_trade(app_id, api_token):
         thread.daemon = True # Allows server to exit even if thread is running
         thread.start()
         
-        # 4. CRITICAL FIX: Return 202 ACCEPTED immediately to the cron job
+        # 4. Return 202 ACCEPTED immediately to the cron job with minimal output
         return jsonify({
             "status": "initiated",
             "message": "Trade request accepted and is running in the background.",
@@ -437,6 +444,8 @@ def execute_trade(app_id, api_token):
         }), 202
         
     except Exception as e:
+        # This logging is at ERROR level, so it will show up in the cron output 
+        # only if the Flask initiation itself fails (which is rare and important)
         logging.error(f"Flask execution error: {e}")
         traceback.print_exc()
         return jsonify({
@@ -503,7 +512,8 @@ def health_check():
 
 
 if __name__ == '__main__':
-    # Print warnings only when running locally for user safety
+    # Startup messages are printed directly here, outside of logging, 
+    # as they only run when the main process starts (e.g., Render deployment)
     print("""
     ⚠️  IMPORTANT WARNINGS:
     ==========================================
