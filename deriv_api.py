@@ -5,14 +5,15 @@ from threading import Thread
 import uuid
 import asyncio
 import logging
-import traceback
+# Removed import traceback - we will rely only on logging
 
 from flask import Flask, request, jsonify
 
 # --- Global Configuration ---
 # CRITICAL FIX: Set logging level to WARNING. This aggressively suppresses all 
-# INFO and DEBUG messages, ensuring minimal output to stdout for the cron job.
-# Only WARNING, ERROR, and CRITICAL messages will appear in the stream.
+# INFO and DEBUG messages. We must rely completely on the internal service logs 
+# for success/debug messages. Only WARNING, ERROR, and CRITICAL messages 
+# will appear in the stream (and we try to avoid even those where possible).
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # In-memory storage for trade results
@@ -57,7 +58,7 @@ class DerivAccumulatorBot:
                     websockets.connect(self.ws_url),
                     timeout=15.0
                 )
-                # CRITICAL: Replaced logging.info() with logging.debug() for connection messages
+                # Messages suppressed by logging.WARNING
                 logging.debug(f"[{self.trade_id}] ✅ Connected to Deriv API via {self.ws_url}")
 
                 auth_success = await self.authorize()
@@ -117,7 +118,7 @@ class DerivAccumulatorBot:
         
         if "authorize" in data:
             self.account_balance = float(data['authorize']['balance'])
-            # CRITICAL: Replaced logging.info() with logging.debug() for balance messages
+            # Messages suppressed by logging.WARNING
             logging.debug(f"[{self.trade_id}] Account authorized. Balance: {self.account_balance}")
             return True
         
@@ -236,7 +237,7 @@ class DerivAccumulatorBot:
             return None, f"Buy Error: {error_msg}"
         
         contract_id = buy_response["buy"]["contract_id"]
-        # CRITICAL: Replaced logging.info() with logging.debug() for trade success message
+        # Messages suppressed by logging.WARNING
         logging.debug(f"[{self.trade_id}] Trade placed. Contract ID: {contract_id}")
         
         return contract_id, None
@@ -273,6 +274,7 @@ class DerivAccumulatorBot:
                         }
                         await self.ws.send(json.dumps(forget_request))
                         
+                        # Messages suppressed by logging.WARNING
                         logging.debug(f"[{self.trade_id}] Contract sold. Profit: {profit}")
                         
                         return {
@@ -357,9 +359,8 @@ class DerivAccumulatorBot:
             }
             
         except Exception as e:
-            # Only use CRITICAL/ERROR/WARNING for the job-ending messages
+            # Removed traceback.print_exc() to prevent stderr output
             logging.critical(f"[{self.trade_id}] CRITICAL: Trade thread crashed with error: {e}")
-            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),
@@ -402,7 +403,7 @@ def execute_trade(app_id, api_token):
     """
     POST /trade/<app_id>/<api_token>
     Initiates a single accumulator trade in a non-blocking thread and immediately 
-    returns a 202 Accepted status.
+    returns a 202 Accepted status. This is the endpoint hit by the cron job.
     """
     try:
         # Get optional parameters from JSON body
@@ -424,7 +425,7 @@ def execute_trade(app_id, api_token):
             "parameters": {'stake': stake, 'target_ticks': target_ticks, 'growth_rate': growth_rate, 'symbol': symbol}
         }
         
-        # We rely on the Render service logs for this. Suppress from stdout.
+        # Messages suppressed by logging.WARNING
         logging.debug(f"[{new_trade_id}] Trade initiated via API. Starting background thread.")
 
         # 3. Start the trade in a separate thread
@@ -435,19 +436,16 @@ def execute_trade(app_id, api_token):
         thread.daemon = True # Allows server to exit even if thread is running
         thread.start()
         
-        # 4. Return 202 ACCEPTED immediately to the cron job with minimal output
+        # 4. Return 202 ACCEPTED immediately with *minimal* JSON
         return jsonify({
             "status": "initiated",
             "message": "Trade request accepted and is running in the background.",
             "trade_id": new_trade_id,
-            "check_url": f"/trade/{new_trade_id}"
         }), 202
         
     except Exception as e:
-        # This logging is at ERROR level, so it will show up in the cron output 
-        # only if the Flask initiation itself fails (which is rare and important)
+        # Removed traceback.print_exc() to prevent stderr output
         logging.error(f"Flask execution error: {e}")
-        traceback.print_exc()
         return jsonify({
             "success": False,
             "error": "Internal Server Error during initiation. Check Render logs."
@@ -512,29 +510,30 @@ def health_check():
 
 
 if __name__ == '__main__':
-    # Startup messages are printed directly here, outside of logging, 
-    # as they only run when the main process starts (e.g., Render deployment)
-    print("""
-    ⚠️  IMPORTANT WARNINGS:
-    ==========================================
-    1. TEST ON DEMO ACCOUNT FIRST!
-    2. Accumulator trading is HIGH RISK
-    3. You can lose your entire stake
-    4. Never trade with money you can't afford to lose
-    ==========================================
-    
-    🚀 API Server Starting...
-    📍 Base URL: http://localhost:5000
-    
-    API Endpoints:
-    - POST   http://localhost:5000/trade/<app_id>/<api_token>
-    - GET    http://localhost:5000/trade/<trade_id>
-    - GET    http://localhost:5000/trades
-    - GET    http://localhost:5000/health
-    
-    Example:
-    POST http://localhost:5000/trade/110971/YOUR_API_TOKEN
-    ==========================================
-    """)
+    # Startup messages are explicitly commented out to prevent output
+    # to stdout/stderr during the service start, which can sometimes interfere
+    # with cron job execution environments.
+    # print("""
+    # ⚠️  IMPORTANT WARNINGS:
+    # ==========================================
+    # 1. TEST ON DEMO ACCOUNT FIRST!
+    # 2. Accumulator trading is HIGH RISK
+    # 3. You can lose your entire stake
+    # 4. Never trade with money you can't afford to lose
+    # ==========================================
+    # 
+    # 🚀 API Server Starting...
+    # 📍 Base URL: http://localhost:5000
+    # 
+    # API Endpoints:
+    # - POST   http://localhost:5000/trade/<app_id>/<api_token>
+    # - GET    http://localhost:5000/trade/<trade_id>
+    # - GET    http://localhost:5000/trades
+    # - GET    http://localhost:5000/health
+    # 
+    # Example:
+    # POST http://localhost:5000/trade/110971/YOUR_API_TOKEN
+    # ==========================================
+    # """)
     
     app.run(debug=True, host='0.0.0.0', port=5000)
