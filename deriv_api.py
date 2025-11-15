@@ -1,101 +1,163 @@
 import json
 import websockets
 from datetime import datetime
-from threading import Thread
+from threading import Thread, Lock
 import uuid
 import asyncio
-import logging
 import os
 import sqlite3
+import sys
+import gc
 from contextlib import contextmanager
 
 from flask import Flask, request, jsonify
 
-# --- CRITICAL: Suppress ALL output for cron jobs ---
-logging.basicConfig(level=logging.CRITICAL, format='%(asctime)s - %(levelname)s - %(message)s')
-logging.getLogger('websockets').setLevel(logging.CRITICAL)
-logging.getLogger('websockets.client').setLevel(logging.CRITICAL)
-logging.getLogger('websockets.protocol').setLevel(logging.CRITICAL)
-logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
+# === CRITICAL: ZERO OUTPUT FOR RENDER CRON ===
+# Redirect ALL output to /dev/null immediately
+if os.environ.get('RENDER_CRON', 'false').lower() == 'true':
+    sys.stdout = open(os.devnull, 'w')
+    sys.stderr = open(os.devnull, 'w')
 
-# Database setup for persistent storage
+# Disable ALL logging completely
+import logging
+logging.disable(logging.CRITICAL)
+for name in logging.root.manager.loggerDict:
+    logging.getLogger(name).disabled = True
+    logging.getLogger(name).propagate = False
+
+# Suppress warnings
+import warnings
+warnings.filterwarnings('ignore')
+
+# Database setup
 DB_PATH = os.environ.get('DB_PATH', 'trades.db')
 
 def init_db():
-    """Initialize SQLite database for persistent trade storage"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS trades (
-            trade_id TEXT PRIMARY KEY,
-            timestamp TEXT,
-            app_id TEXT,
-            status TEXT,
-            success INTEGER,
-            contract_id TEXT,
-            profit REAL,
-            final_balance REAL,
-            error TEXT,
-            parameters TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    """Initialize SQLite database"""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trades (
+                trade_id TEXT PRIMARY KEY,
+                timestamp TEXT,
+                app_id TEXT,
+                status TEXT,
+                success INTEGER,
+                contract_id TEXT,
+                profit REAL,
+                final_balance REAL,
+                error TEXT,
+                parameters TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except:
+        pass
 
 @contextmanager
 def get_db():
     """Context manager for database connections"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = None
     try:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA journal_mode=WAL')
         yield conn
+    except:
+        pass
     finally:
-        conn.close()
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
 def save_trade(trade_id, trade_data):
     """Save trade to database"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO trades 
-            (trade_id, timestamp, app_id, status, success, contract_id, profit, final_balance, error, parameters)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            trade_id,
-            trade_data.get('timestamp'),
-            trade_data.get('app_id'),
-            trade_data.get('status'),
-            1 if trade_data.get('success') else 0,
-            trade_data.get('contract_id'),
-            trade_data.get('profit'),
-            trade_data.get('final_balance'),
-            trade_data.get('error'),
-            json.dumps(trade_data.get('parameters', {}))
-        ))
-        conn.commit()
+    try:
+        with get_db() as conn:
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO trades 
+                    (trade_id, timestamp, app_id, status, success, contract_id, profit, final_balance, error, parameters)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    trade_id,
+                    trade_data.get('timestamp'),
+                    trade_data.get('app_id'),
+                    trade_data.get('status'),
+                    1 if trade_data.get('success') else 0,
+                    trade_data.get('contract_id'),
+                    trade_data.get('profit'),
+                    trade_data.get('final_balance'),
+                    trade_data.get('error'),
+                    json.dumps(trade_data.get('parameters', {}))
+                ))
+                conn.commit()
+    except:
+        pass
 
 def get_trade(trade_id):
     """Get single trade from database"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM trades WHERE trade_id = ?', (trade_id,))
-        row = cursor.fetchone()
-        if row:
-            return dict(row)
+    try:
+        with get_db() as conn:
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM trades WHERE trade_id = ?', (trade_id,))
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+    except:
+        pass
     return None
 
 def get_all_trades():
     """Get all trades from database"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM trades ORDER BY timestamp DESC')
-        return [dict(row) for row in cursor.fetchall()]
+    try:
+        with get_db() as conn:
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM trades ORDER BY timestamp DESC')
+                return [dict(row) for row in cursor.fetchall()]
+    except:
+        pass
+    return []
 
-# Initialize database on startup
-init_db()
+# Initialize database
+try:
+    init_db()
+except:
+    pass
 
-# In-memory cache for active trades
+# In-memory cache and concurrency control
 trade_results = {}
+MAX_CONCURRENT_TRADES = 3
+active_trades_lock = Lock()
+active_trade_count = 0
+
+def can_start_trade():
+    """Check if we can start a new trade"""
+    global active_trade_count
+    try:
+        with active_trades_lock:
+            if active_trade_count >= MAX_CONCURRENT_TRADES:
+                return False
+            active_trade_count += 1
+            return True
+    except:
+        return False
+
+def trade_completed():
+    """Mark trade as completed"""
+    global active_trade_count
+    try:
+        with active_trades_lock:
+            active_trade_count = max(0, active_trade_count - 1)
+    except:
+        pass
 
 class DerivAccumulatorBot:
     def __init__(self, api_token, app_id, trade_id, parameters):
@@ -130,23 +192,24 @@ class DerivAccumulatorBot:
             self.ws_url = ws_url
             try:
                 self.ws = await asyncio.wait_for(
-                    websockets.connect(self.ws_url),
+                    websockets.connect(self.ws_url, ping_interval=None, close_timeout=5),
                     timeout=15.0
                 )
                 auth_success = await self.authorize()
                 if not auth_success:
-                    await self.ws.close()
+                    try:
+                        await self.ws.close()
+                    except:
+                        pass
                     self.ws = None
                     raise Exception("Authorization failed")
                 return True
-            except asyncio.TimeoutError:
+            except:
                 if self.ws:
-                    await self.ws.close()
-                    self.ws = None
-                continue
-            except Exception:
-                if self.ws:
-                    await self.ws.close()
+                    try:
+                        await self.ws.close()
+                    except:
+                        pass
                     self.ws = None
                 continue
         
@@ -160,33 +223,36 @@ class DerivAccumulatorBot:
         if not self.api_token:
             return False
         
-        auth_request = {
-            "authorize": self.api_token,
-            "req_id": self.get_next_request_id()
-        }
-        await self.ws.send(json.dumps(auth_request))
-        
         try:
+            auth_request = {
+                "authorize": self.api_token,
+                "req_id": self.get_next_request_id()
+            }
+            await self.ws.send(json.dumps(auth_request))
+            
             response = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
             data = json.loads(response)
+            
+            if "error" in data:
+                return False
+            
+            if "authorize" in data:
+                self.account_balance = float(data['authorize']['balance'])
+                return True
         except:
-            return False
-        
-        if "error" in data:
-            return False
-        
-        if "authorize" in data:
-            self.account_balance = float(data['authorize']['balance'])
-            return True
+            pass
         return False
     
     async def get_balance(self):
-        balance_request = {"balance": 1, "subscribe": 0, "req_id": self.get_next_request_id()}
-        response_data = await self.send_request(balance_request)
-        
-        if response_data and "balance" in response_data:
-            self.account_balance = float(response_data["balance"]["balance"])
-            return self.account_balance
+        try:
+            balance_request = {"balance": 1, "subscribe": 0, "req_id": self.get_next_request_id()}
+            response_data = await self.send_request(balance_request)
+            
+            if response_data and "balance" in response_data:
+                self.account_balance = float(response_data["balance"]["balance"])
+                return self.account_balance
+        except:
+            pass
         return self.account_balance
     
     async def validate_symbol(self):
@@ -216,10 +282,7 @@ class DerivAccumulatorBot:
         
         try:
             await self.ws.send(json.dumps(request))
-        except:
-            return None
-        
-        try:
+            
             while True:
                 response_text = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
                 data = json.loads(response_text)
@@ -228,106 +291,116 @@ class DerivAccumulatorBot:
                 if "subscription" in data:
                     continue
         except:
-            return None
+            pass
+        return None
 
     async def place_accumulator_trade(self):
-        balance = await self.get_balance()
-        if balance < self.stake_per_trade:
-            return None, "Insufficient balance"
-        
-        if not self.symbol_available:
-            if not await self.validate_symbol():
-                return None, "Symbol validation failed"
-        
-        proposal_request = {
-            "proposal": 1,
-            "amount": self.stake_per_trade,
-            "basis": "stake",
-            "contract_type": self.contract_type,
-            "currency": "USD",
-            "symbol": self.symbol,
-            "growth_rate": self.accumulator_range
-        }
-        
-        proposal_response = await self.send_request(proposal_request)
-        if not proposal_response or "error" in proposal_response:
-            return None, "Proposal failed"
-        
-        proposal_id = proposal_response["proposal"]["id"]
-        ask_price = proposal_response["proposal"]["ask_price"]
-        
-        buy_request = {"buy": proposal_id, "price": ask_price}
-        buy_response = await self.send_request(buy_request)
-        
-        if not buy_response or "error" in buy_response:
-            return None, "Buy failed"
-        
-        return buy_response["buy"]["contract_id"], None
+        try:
+            balance = await self.get_balance()
+            if balance < self.stake_per_trade:
+                return None, "Insufficient balance"
+            
+            if not self.symbol_available:
+                if not await self.validate_symbol():
+                    return None, "Symbol validation failed"
+            
+            proposal_request = {
+                "proposal": 1,
+                "amount": self.stake_per_trade,
+                "basis": "stake",
+                "contract_type": self.contract_type,
+                "currency": "USD",
+                "symbol": self.symbol,
+                "growth_rate": self.accumulator_range
+            }
+            
+            proposal_response = await self.send_request(proposal_request)
+            if not proposal_response or "error" in proposal_response:
+                return None, "Proposal failed"
+            
+            proposal_id = proposal_response["proposal"]["id"]
+            ask_price = proposal_response["proposal"]["ask_price"]
+            
+            buy_request = {"buy": proposal_id, "price": ask_price}
+            buy_response = await self.send_request(buy_request)
+            
+            if not buy_response or "error" in buy_response:
+                return None, "Buy failed"
+            
+            return buy_response["buy"]["contract_id"], None
+        except Exception as e:
+            return None, str(e)
     
     async def monitor_contract(self, contract_id):
-        req_id = self.get_next_request_id()
-        proposal_request = {
-            "proposal_open_contract": 1,
-            "contract_id": contract_id,
-            "subscribe": 1,
-            "req_id": req_id
-        }
-        await self.ws.send(json.dumps(proposal_request))
-        tick_count = 0
-        
-        while True:
-            try:
-                response = await asyncio.wait_for(self.ws.recv(), timeout=20.0) 
-                data = json.loads(response)
-                
-                if "proposal_open_contract" in data:
-                    contract = data["proposal_open_contract"]
+        try:
+            req_id = self.get_next_request_id()
+            proposal_request = {
+                "proposal_open_contract": 1,
+                "contract_id": contract_id,
+                "subscribe": 1,
+                "req_id": req_id
+            }
+            await self.ws.send(json.dumps(proposal_request))
+            tick_count = 0
+            
+            while True:
+                try:
+                    response = await asyncio.wait_for(self.ws.recv(), timeout=20.0) 
+                    data = json.loads(response)
                     
-                    if contract.get("is_sold") or contract.get("status") == "sold":
-                        profit = float(contract.get("profit", 0))
-                        forget_request = {
-                            "forget": data.get("subscription", {}).get("id"),
-                            "req_id": self.get_next_request_id()
-                        }
-                        await self.ws.send(json.dumps(forget_request))
-                        return {
-                            "profit": profit,
-                            "status": "win" if profit > 0 else "loss",
-                            "contract_id": contract_id
-                        }
-                    
-                    if contract.get("entry_spot"):
-                        tick_count += 1
-
-                    if tick_count >= self.target_ticks:
-                        sell_request = {
-                            "sell": contract_id,
-                            "price": 0.0,
-                            "req_id": self.get_next_request_id()
-                        }
-                        await self.send_request(sell_request)
+                    if "proposal_open_contract" in data:
+                        contract = data["proposal_open_contract"]
                         
-                elif "error" in data:
-                    return {"profit": 0, "status": "error", "error": data['error']['message']}
-            except:
-                return {"profit": 0, "status": "error", "error": "Timeout"}
+                        if contract.get("is_sold") or contract.get("status") == "sold":
+                            profit = float(contract.get("profit", 0))
+                            try:
+                                forget_request = {
+                                    "forget": data.get("subscription", {}).get("id"),
+                                    "req_id": self.get_next_request_id()
+                                }
+                                await self.ws.send(json.dumps(forget_request))
+                            except:
+                                pass
+                            return {
+                                "profit": profit,
+                                "status": "win" if profit > 0 else "loss",
+                                "contract_id": contract_id
+                            }
+                        
+                        if contract.get("entry_spot"):
+                            tick_count += 1
+
+                        if tick_count >= self.target_ticks:
+                            sell_request = {
+                                "sell": contract_id,
+                                "price": 0.0,
+                                "req_id": self.get_next_request_id()
+                            }
+                            await self.send_request(sell_request)
+                            
+                    elif "error" in data:
+                        return {"profit": 0, "status": "error", "error": data['error']['message']}
+                except:
+                    return {"profit": 0, "status": "error", "error": "Timeout"}
+        except:
+            return {"profit": 0, "status": "error", "error": "Monitor failed"}
     
     async def execute_trade_async(self):
         """Execute trade and save to database"""
-        trade_results[self.trade_id] = {'status': 'running'}
-        save_trade(self.trade_id, {
-            'timestamp': datetime.now().isoformat(),
-            'app_id': self.app_id,
-            'status': 'running',
-            'parameters': {
-                'stake': self.stake_per_trade,
-                'target_ticks': self.target_ticks,
-                'growth_rate': self.accumulator_range,
-                'symbol': self.symbol
-            }
-        })
-        
         try:
+            trade_results[self.trade_id] = {'status': 'running'}
+            save_trade(self.trade_id, {
+                'timestamp': datetime.now().isoformat(),
+                'app_id': self.app_id,
+                'status': 'running',
+                'parameters': {
+                    'stake': self.stake_per_trade,
+                    'target_ticks': self.target_ticks,
+                    'growth_rate': self.accumulator_range,
+                    'symbol': self.symbol
+                }
+            })
+            
             await self.connect()
             
             if not await self.validate_symbol():
@@ -386,32 +459,53 @@ class DerivAccumulatorBot:
             return result
         finally:
             if self.ws:
-                await self.ws.close()
+                try:
+                    await self.ws.close()
+                except:
+                    pass
             if self.trade_id in trade_results:
-                del trade_results[self.trade_id]
+                try:
+                    del trade_results[self.trade_id]
+                except:
+                    pass
+            gc.collect()
 
 
 def run_async_trade_in_thread(api_token, app_id, stake, target_ticks, growth_rate, symbol, trade_id):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    parameters = {
-        'stake': stake,
-        'target_ticks': target_ticks,
-        'growth_rate': growth_rate,
-        'symbol': symbol
-    }
-    
-    bot = DerivAccumulatorBot(api_token, app_id, trade_id, parameters)
-    loop.run_until_complete(bot.execute_trade_async())
-    loop.close()
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        parameters = {
+            'stake': stake,
+            'target_ticks': target_ticks,
+            'growth_rate': growth_rate,
+            'symbol': symbol
+        }
+        
+        bot = DerivAccumulatorBot(api_token, app_id, trade_id, parameters)
+        loop.run_until_complete(bot.execute_trade_async())
+        loop.close()
+    except:
+        pass
+    finally:
+        trade_completed()
+        gc.collect()
 
 
 app = Flask(__name__)
+app.logger.disabled = True
 
 @app.route('/trade/<app_id>/<api_token>', methods=['POST'])
 def execute_trade(app_id, api_token):
     try:
+        if not can_start_trade():
+            return jsonify({
+                "success": False, 
+                "error": "Too many concurrent trades",
+                "max_concurrent": MAX_CONCURRENT_TRADES
+            }), 429
+        
         data = request.get_json(silent=True) or {}
         stake = float(data.get('stake', 10.0))
         target_ticks = int(data.get('target_ticks', 1))
@@ -437,6 +531,7 @@ def execute_trade(app_id, api_token):
         
         return jsonify({"status": "initiated", "trade_id": new_trade_id}), 202
     except:
+        trade_completed()
         return jsonify({"success": False, "error": "Internal Server Error"}), 500
 
 
@@ -471,12 +566,9 @@ def get_trade_result(trade_id):
 @app.route('/trades', methods=['GET'])
 def get_all_trades_endpoint():
     all_trades = get_all_trades()
-    
-    # Get filter parameter (default to 'today')
     filter_by = request.args.get('filter', 'today')
     
-    # Filter trades based on date
-    from datetime import date, timedelta
+    from datetime import date
     today = date.today()
     
     if filter_by == 'today':
@@ -581,7 +673,9 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "service": "Deriv Accumulator Trading API",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "active_trades": active_trade_count,
+        "max_concurrent": MAX_CONCURRENT_TRADES
     }), 200
 
 
@@ -663,7 +757,6 @@ def dashboard():
                 const response = await fetch(`/trades?filter=${currentFilter}`);
                 const data = await response.json();
                 
-                // Update date display
                 const dateStr = new Date(data.date).toLocaleDateString('en-US', { 
                     weekday: 'long', 
                     year: 'numeric', 
@@ -673,28 +766,7 @@ def dashboard():
                 document.getElementById('currentDate').textContent = 
                     currentFilter === 'today' ? `📅 ${dateStr}` : '📅 All Time';
                 
-                // Update stats
                 const statsHtml = `
-                    <div class="stat-card">
-                        <div class="stat-label">Total Trades</div>
-                        <div class="stat-value">${data.total_trades}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Completed</div>
-                        <div class="stat-value">${data.completed_trades}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Wins</div>
-                        <div class="stat-value positive">${data.wins}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Losses</div>
-                        <div class="stat-value negative">${data.losses}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Win Rate</div>
-                        <div class="stat-value">${data.win_rate}</div>
-                    </div>
                     <div class="stat-card">
                         <div class="stat-label">Total P/L</div>
                         <div class="stat-value ${data.total_profit_loss >= 0 ? 'positive' : 'negative'}">
@@ -704,7 +776,6 @@ def dashboard():
                 `;
                 document.getElementById('stats').innerHTML = statsHtml;
                 
-                // Update trades table
                 const trades = Object.entries(data.trades)
                     .filter(([_, t]) => t.status === 'completed' && (t.success || t.success === 1))
                     .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
@@ -735,10 +806,7 @@ def dashboard():
             window.location.href = '/trades/export';
         }
         
-        // Load data on page load
         loadData();
-        
-        // Auto-refresh every 10 seconds
         setInterval(loadData, 10000);
     </script>
 </body>
@@ -747,4 +815,5 @@ def dashboard():
 
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=5000, use_reloader=False, threaded=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False, threaded=True)
