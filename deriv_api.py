@@ -768,6 +768,26 @@ def dashboard():
                 
                 const statsHtml = `
                     <div class="stat-card">
+                        <div class="stat-label">Total Trades</div>
+                        <div class="stat-value">${data.total_trades}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Completed</div>
+                        <div class="stat-value">${data.completed_trades}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Wins</div>
+                        <div class="stat-value positive">${data.wins}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Losses</div>
+                        <div class="stat-value negative">${data.losses}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Win Rate</div>
+                        <div class="stat-value">${data.win_rate}</div>
+                    </div>
+                    <div class="stat-card">
                         <div class="stat-label">Total P/L</div>
                         <div class="stat-value ${data.total_profit_loss >= 0 ? 'positive' : 'negative'}">
                             ${data.total_profit_loss.toFixed(2)}
