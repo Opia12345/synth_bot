@@ -471,16 +471,33 @@ def get_trade_result(trade_id):
 @app.route('/trades', methods=['GET'])
 def get_all_trades_endpoint():
     all_trades = get_all_trades()
-    completed = [t for t in all_trades if t.get('status') == 'completed' and (t.get('success') or t.get('success') == 1)]
+    
+    # Get filter parameter (default to 'today')
+    filter_by = request.args.get('filter', 'today')
+    
+    # Filter trades based on date
+    from datetime import date, timedelta
+    today = date.today()
+    
+    if filter_by == 'today':
+        filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
+    elif filter_by == 'all':
+        filtered_trades = all_trades
+    else:
+        filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
+    
+    completed = [t for t in filtered_trades if t.get('status') == 'completed' and (t.get('success') or t.get('success') == 1)]
     
     total_profit = sum(t.get('profit', 0) for t in completed)
     wins = [t for t in completed if t.get('profit', 0) > 0]
     losses = [t for t in completed if t.get('profit', 0) <= 0]
     
-    trades_dict = {t['trade_id']: dict(t) for t in all_trades}
+    trades_dict = {t['trade_id']: dict(t) for t in filtered_trades}
     
     return jsonify({
-        "total_trades": len(all_trades),
+        "filter": filter_by,
+        "date": today.isoformat(),
+        "total_trades": len(filtered_trades),
         "completed_trades": len(completed),
         "wins": len(wins),
         "losses": len(losses),
@@ -603,9 +620,18 @@ def dashboard():
         <div class="header">
             <h1>📊 Deriv Trading Dashboard</h1>
             <p>Real-time trading performance monitoring</p>
+            <p id="currentDate" style="margin-top: 10px; font-size: 14px;"></p>
         </div>
-        <button class="refresh-btn" onclick="loadData()">🔄 Refresh Data</button>
-        <button class="export-btn" onclick="exportCSV()">📥 Export CSV</button>
+        
+        <div style="margin-bottom: 20px;">
+            <button class="refresh-btn" onclick="loadData()">🔄 Refresh Data</button>
+            <button class="export-btn" onclick="exportCSV()">📥 Export CSV</button>
+            <select id="filterSelect" onchange="changeFilter()" style="padding: 10px; border-radius: 5px; margin-left: 10px; cursor: pointer;">
+                <option value="today">Today's Trades</option>
+                <option value="all">All Trades</option>
+            </select>
+        </div>
+        
         <div class="stats" id="stats"></div>
         <div class="trades-table">
             <h2>Recent Trades</h2>
@@ -625,10 +651,29 @@ def dashboard():
         </div>
     </div>
     <script>
+        let currentFilter = 'today';
+        
+        function changeFilter() {
+            currentFilter = document.getElementById('filterSelect').value;
+            loadData();
+        }
+        
         async function loadData() {
             try {
-                const response = await fetch('/trades');
+                const response = await fetch(`/trades?filter=${currentFilter}`);
                 const data = await response.json();
+                
+                // Update date display
+                const dateStr = new Date(data.date).toLocaleDateString('en-US', { 
+                    weekday: 'long', 
+                    year: 'numeric', 
+                    month: 'long', 
+                    day: 'numeric' 
+                });
+                document.getElementById('currentDate').textContent = 
+                    currentFilter === 'today' ? `📅 ${dateStr}` : '📅 All Time';
+                
+                // Update stats
                 const statsHtml = `
                     <div class="stat-card">
                         <div class="stat-label">Total Trades</div>
@@ -658,9 +703,12 @@ def dashboard():
                     </div>
                 `;
                 document.getElementById('stats').innerHTML = statsHtml;
+                
+                // Update trades table
                 const trades = Object.entries(data.trades)
                     .filter(([_, t]) => t.status === 'completed' && (t.success || t.success === 1))
                     .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
+                
                 const tradesHtml = trades.map(([id, trade]) => {
                     const profit = trade.profit || 0;
                     const resultClass = profit > 0 ? 'win' : 'loss';
@@ -676,15 +724,21 @@ def dashboard():
                         </tr>
                     `;
                 }).join('');
+                
                 document.getElementById('tradesBody').innerHTML = tradesHtml || '<tr><td colspan="6">No completed trades yet</td></tr>';
             } catch (error) {
                 console.error('Error loading data:', error);
             }
         }
+        
         function exportCSV() {
             window.location.href = '/trades/export';
         }
+        
+        // Load data on page load
         loadData();
+        
+        // Auto-refresh every 10 seconds
         setInterval(loadData, 10000);
     </script>
 </body>
