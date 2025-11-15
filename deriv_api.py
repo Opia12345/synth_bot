@@ -441,11 +441,99 @@ def get_trade_result(trade_id):
 
 @app.route('/trades', methods=['GET'])
 def get_all_trades():
-    """GET /trades - Get all trade results"""
+    """GET /trades - Get all trade results with summary statistics"""
+    completed = [t for t in trade_results.values() if t.get('status') == 'completed' and t.get('success')]
+    
+    total_profit = sum(t.get('profit', 0) for t in completed)
+    wins = [t for t in completed if t.get('profit', 0) > 0]
+    losses = [t for t in completed if t.get('profit', 0) <= 0]
+    
     return jsonify({
         "total_trades": len(trade_results),
+        "completed_trades": len(completed),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": f"{(len(wins)/len(completed)*100):.2f}%" if completed else "0%",
+        "total_profit_loss": round(total_profit, 2),
         "trades": trade_results
     }), 200
+
+
+@app.route('/trades/summary', methods=['GET'])
+def get_trades_summary():
+    """GET /trades/summary - Get detailed trading statistics"""
+    completed = [t for t in trade_results.values() if t.get('status') == 'completed' and t.get('success')]
+    
+    if not completed:
+        return jsonify({
+            "message": "No completed trades yet",
+            "total_trades": len(trade_results)
+        }), 200
+    
+    total_profit = sum(t.get('profit', 0) for t in completed)
+    wins = [t for t in completed if t.get('profit', 0) > 0]
+    losses = [t for t in completed if t.get('profit', 0) <= 0]
+    
+    win_amounts = [t.get('profit', 0) for t in wins]
+    loss_amounts = [abs(t.get('profit', 0)) for t in losses]
+    
+    return jsonify({
+        "summary": {
+            "total_trades": len(completed),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": f"{(len(wins)/len(completed)*100):.2f}%",
+            "total_profit_loss": round(total_profit, 2)
+        },
+        "profit_stats": {
+            "average_win": round(sum(win_amounts)/len(win_amounts), 2) if win_amounts else 0,
+            "average_loss": round(sum(loss_amounts)/len(loss_amounts), 2) if loss_amounts else 0,
+            "largest_win": round(max(win_amounts), 2) if win_amounts else 0,
+            "largest_loss": round(max(loss_amounts), 2) if loss_amounts else 0
+        },
+        "recent_trades": [
+            {
+                "trade_id": tid,
+                "timestamp": t.get('timestamp'),
+                "profit": t.get('profit', 0),
+                "result": "WIN" if t.get('profit', 0) > 0 else "LOSS",
+                "contract_id": t.get('contract_id')
+            }
+            for tid, t in sorted(
+                [(k, v) for k, v in trade_results.items() if v.get('status') == 'completed' and v.get('success')],
+                key=lambda x: x[1].get('timestamp', ''),
+                reverse=True
+            )[:10]
+        ]
+    }), 200
+
+
+@app.route('/trades/export', methods=['GET'])
+def export_trades():
+    """GET /trades/export - Export all trades as CSV format"""
+    completed = [(tid, t) for tid, t in trade_results.items() 
+                 if t.get('status') == 'completed' and t.get('success')]
+    
+    if not completed:
+        return jsonify({"message": "No completed trades to export"}), 200
+    
+    csv_lines = ["Trade_ID,Timestamp,Contract_ID,Profit_Loss,Result,Final_Balance"]
+    
+    for trade_id, trade in sorted(completed, key=lambda x: x[1].get('timestamp', '')):
+        profit = trade.get('profit', 0)
+        csv_lines.append(
+            f"{trade_id},"
+            f"{trade.get('timestamp', 'N/A')},"
+            f"{trade.get('contract_id', 'N/A')},"
+            f"{profit:.2f},"
+            f"{'WIN' if profit > 0 else 'LOSS'},"
+            f"{trade.get('final_balance', 'N/A')}"
+        )
+    
+    return "\n".join(csv_lines), 200, {
+        'Content-Type': 'text/csv',
+        'Content-Disposition': 'attachment; filename=trades.csv'
+    }
 
 
 @app.route('/health', methods=['GET'])
@@ -456,6 +544,151 @@ def health_check():
         "service": "Deriv Accumulator Trading API",
         "timestamp": datetime.now().isoformat()
     }), 200
+
+
+@app.route('/dashboard', methods=['GET'])
+def dashboard():
+    """Web dashboard to view trading results"""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Trading Dashboard</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            .header { background: #2c3e50; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+            .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+            .stat-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .stat-label { font-size: 14px; color: #666; margin-bottom: 5px; }
+            .stat-value { font-size: 28px; font-weight: bold; color: #2c3e50; }
+            .stat-value.positive { color: #27ae60; }
+            .stat-value.negative { color: #e74c3c; }
+            .trades-table { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow-x: auto; }
+            table { width: 100%; border-collapse: collapse; }
+            th { background: #34495e; color: white; padding: 12px; text-align: left; }
+            td { padding: 10px; border-bottom: 1px solid #ddd; }
+            tr:hover { background: #f8f9fa; }
+            .win { color: #27ae60; font-weight: bold; }
+            .loss { color: #e74c3c; font-weight: bold; }
+            .refresh-btn { background: #3498db; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin-bottom: 20px; }
+            .refresh-btn:hover { background: #2980b9; }
+            .export-btn { background: #27ae60; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin-left: 10px; }
+            .export-btn:hover { background: #229954; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>📊 Deriv Trading Dashboard</h1>
+                <p>Real-time trading performance monitoring</p>
+            </div>
+            
+            <button class="refresh-btn" onclick="loadData()">🔄 Refresh Data</button>
+            <button class="export-btn" onclick="exportCSV()">📥 Export CSV</button>
+            
+            <div class="stats" id="stats"></div>
+            
+            <div class="trades-table">
+                <h2>Recent Trades</h2>
+                <table id="tradesTable">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Trade ID</th>
+                            <th>Contract ID</th>
+                            <th>Profit/Loss</th>
+                            <th>Result</th>
+                            <th>Final Balance</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradesBody"></tbody>
+                </table>
+            </div>
+        </div>
+        
+        <script>
+            async function loadData() {
+                try {
+                    const response = await fetch('/trades');
+                    const data = await response.json();
+                    
+                    // Update stats
+                    const statsHtml = `
+                        <div class="stat-card">
+                            <div class="stat-label">Total Trades</div>
+                            <div class="stat-value">${data.total_trades}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Completed</div>
+                            <div class="stat-value">${data.completed_trades}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Wins</div>
+                            <div class="stat-value positive">${data.wins}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Losses</div>
+                            <div class="stat-value negative">${data.losses}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Win Rate</div>
+                            <div class="stat-value">${data.win_rate}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Total P/L</div>
+                            <div class="stat-value ${data.total_profit_loss >= 0 ? 'positive' : 'negative'}">
+                                ${data.total_profit_loss.toFixed(2)}
+                            </div>
+                        </div>
+                    `;
+                    document.getElementById('stats').innerHTML = statsHtml;
+                    
+                    // Update trades table
+                    const trades = Object.entries(data.trades)
+                        .filter(([_, t]) => t.status === 'completed' && t.success)
+                        .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
+                    
+                    const tradesHtml = trades.map(([id, trade]) => {
+                        const profit = trade.profit || 0;
+                        const resultClass = profit > 0 ? 'win' : 'loss';
+                        const resultText = profit > 0 ? 'WIN' : 'LOSS';
+                        
+                        return `
+                            <tr>
+                                <td>${new Date(trade.timestamp).toLocaleString()}</td>
+                                <td>${id.substring(0, 8)}...</td>
+                                <td>${trade.contract_id || 'N/A'}</td>
+                                <td class="${resultClass}">${profit.toFixed(2)}</td>
+                                <td class="${resultClass}">${resultText}</td>
+                                <td>${(trade.final_balance || 0).toFixed(2)}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                    
+                    document.getElementById('tradesBody').innerHTML = tradesHtml || '<tr><td colspan="6">No completed trades yet</td></tr>';
+                    
+                } catch (error) {
+                    console.error('Error loading data:', error);
+                    alert('Failed to load trading data');
+                }
+            }
+            
+            function exportCSV() {
+                window.location.href = '/trades/export';
+            }
+            
+            // Load data on page load
+            loadData();
+            
+            // Auto-refresh every 10 seconds
+            setInterval(loadData, 10000);
+        </script>
+    </body>
+    </html>
+    """
+    return html, 200
 
 
 if __name__ == '__main__':
