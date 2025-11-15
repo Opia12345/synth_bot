@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: deriv-trading-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT --log-level critical --access-logfile - --error-logfile - app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DB_PATH
+        value: /opt/render/project/src/trades.db
