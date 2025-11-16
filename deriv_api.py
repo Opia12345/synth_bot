@@ -686,18 +686,23 @@ def restart_service():
             "Content-Type": "application/json"
         }
         
-        response = req.post(url, headers=headers, timeout=10)
-        
-        if response.status_code == 201:
+        try:
+            response = req.post(url, headers=headers, timeout=10)
+            
             return jsonify({
-                "success": True,
-                "message": "Server restart initiated"
-            }), 200
-        else:
+                "success": response.status_code == 201,
+                "status_code": response.status_code,
+                "message": "Server restart initiated" if response.status_code == 201 else "Restart failed",
+                "response_text": response.text,
+                "url": url
+            }), 200 if response.status_code == 201 else 500
+            
+        except req.exceptions.RequestException as e:
             return jsonify({
                 "success": False,
-                "error": f"Restart failed: {response.status_code}",
-                "response": response.text
+                "error": "Request to Render API failed",
+                "details": str(e),
+                "error_type": type(e).__name__
             }), 500
             
     except Exception as e:
