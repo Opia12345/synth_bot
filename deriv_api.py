@@ -10,30 +10,27 @@ import sys
 import gc
 from contextlib import contextmanager
 
-from flask import Flask, request, jsonify
+# === ABSOLUTE ZERO OUTPUT ===
+sys.stdout = open(os.devnull, 'w')
+sys.stderr = open(os.devnull, 'w')
 
-# === CRITICAL: ZERO OUTPUT FOR RENDER CRON ===
-# Redirect ALL output to /dev/null immediately
-if os.environ.get('RENDER_CRON', 'false').lower() == 'true':
-    sys.stdout = open(os.devnull, 'w')
-    sys.stderr = open(os.devnull, 'w')
-
-# Disable ALL logging completely
 import logging
 logging.disable(logging.CRITICAL)
-for name in logging.root.manager.loggerDict:
-    logging.getLogger(name).disabled = True
-    logging.getLogger(name).propagate = False
+os.environ['PYTHONUNBUFFERED'] = '0'
 
-# Suppress warnings
 import warnings
 warnings.filterwarnings('ignore')
+
+from flask import Flask, request, jsonify
+
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+log.disabled = True
 
 # Database setup
 DB_PATH = os.environ.get('DB_PATH', 'trades.db')
 
 def init_db():
-    """Initialize SQLite database"""
     try:
         conn = sqlite3.connect(DB_PATH, timeout=30.0)
         cursor = conn.cursor()
@@ -58,7 +55,6 @@ def init_db():
 
 @contextmanager
 def get_db():
-    """Context manager for database connections"""
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
@@ -75,7 +71,6 @@ def get_db():
                 pass
 
 def save_trade(trade_id, trade_data):
-    """Save trade to database"""
     try:
         with get_db() as conn:
             if conn:
@@ -101,7 +96,6 @@ def save_trade(trade_id, trade_data):
         pass
 
 def get_trade(trade_id):
-    """Get single trade from database"""
     try:
         with get_db() as conn:
             if conn:
@@ -115,7 +109,6 @@ def get_trade(trade_id):
     return None
 
 def get_all_trades():
-    """Get all trades from database"""
     try:
         with get_db() as conn:
             if conn:
@@ -126,20 +119,17 @@ def get_all_trades():
         pass
     return []
 
-# Initialize database
 try:
     init_db()
 except:
     pass
 
-# In-memory cache and concurrency control
 trade_results = {}
-MAX_CONCURRENT_TRADES = 3
+MAX_CONCURRENT_TRADES = 2
 active_trades_lock = Lock()
 active_trade_count = 0
 
 def can_start_trade():
-    """Check if we can start a new trade"""
     global active_trade_count
     try:
         with active_trades_lock:
@@ -151,7 +141,6 @@ def can_start_trade():
         return False
 
 def trade_completed():
-    """Mark trade as completed"""
     global active_trade_count
     try:
         with active_trades_lock:
@@ -159,39 +148,15 @@ def trade_completed():
     except:
         pass
 
-def delayed_restart(delay_seconds=60):
-    """Restart server after delay (clears memory/logs)"""
-    try:
-        import time
-        time.sleep(delay_seconds)
-        
-        # Trigger restart by calling Render API
-        render_api_key = os.environ.get('RENDER_API_KEY')
-        service_id = os.environ.get('RENDER_SERVICE_ID')
-        
-        if render_api_key and service_id:
-            import requests
-            url = f"https://api.render.com/v1/services/{service_id}/restarts"
-            headers = {
-                "Authorization": f"Bearer {render_api_key}",
-                "Content-Type": "application/json"
-            }
-            requests.post(url, headers=headers, timeout=10)
-    except:
-        pass
-
 class DerivAccumulatorBot:
     def __init__(self, api_token, app_id, trade_id, parameters):
-        """Initialize the Deriv Accumulator Bot"""
         self.api_token = api_token
         self.app_id = app_id
         self.trade_id = trade_id
-        
         self.stake_per_trade = parameters.get('stake', 10.0)
         self.target_ticks = parameters.get('target_ticks', 1)
         self.accumulator_range = parameters.get('growth_rate', 0.03)
         self.symbol = parameters.get('symbol', '1HZ10V')
-        
         self.ws_urls = [
             f"wss://ws.derivws.com/websockets/v3?app_id={app_id}",
             f"wss://wscluster1.deriv.com/websockets/v3?app_id={app_id}",
@@ -407,7 +372,6 @@ class DerivAccumulatorBot:
             return {"profit": 0, "status": "error", "error": "Monitor failed"}
     
     async def execute_trade_async(self):
-        """Execute trade and save to database"""
         try:
             trade_results[self.trade_id] = {'status': 'running'}
             save_trade(self.trade_id, {
@@ -532,7 +496,6 @@ def execute_trade(app_id, api_token):
         target_ticks = int(data.get('target_ticks', 1))
         growth_rate = float(data.get('growth_rate', 0.03))
         symbol = data.get('symbol', '1HZ10V')
-        auto_restart = data.get('auto_restart', False)  # New parameter
         
         new_trade_id = str(uuid.uuid4())
         initial_data = {
@@ -550,11 +513,6 @@ def execute_trade(app_id, api_token):
         )
         thread.daemon = True
         thread.start()
-        
-        # Optional: Schedule server restart after trade completes
-        if auto_restart:
-            restart_thread = Thread(target=delayed_restart, args=(60,), daemon=True)
-            restart_thread.start()
         
         return jsonify({"status": "initiated", "trade_id": new_trade_id}), 202
     except:
@@ -710,17 +668,17 @@ def health_check():
 def restart_service():
     """Manual restart endpoint - clears logs and memory"""
     try:
-        # Get API key from environment
         render_api_key = os.environ.get('RENDER_API_KEY')
         service_id = os.environ.get('RENDER_SERVICE_ID')
         
         if not render_api_key or not service_id:
             return jsonify({
                 "success": False,
-                "error": "Render API credentials not configured"
+                "error": "Render API credentials not configured",
+                "has_api_key": bool(render_api_key),
+                "has_service_id": bool(service_id)
             }), 500
         
-        # Call Render API to restart service
         import requests as req
         url = f"https://api.render.com/v1/services/{service_id}/restarts"
         headers = {
@@ -738,14 +696,30 @@ def restart_service():
         else:
             return jsonify({
                 "success": False,
-                "error": f"Restart failed: {response.status_code}"
+                "error": f"Restart failed: {response.status_code}",
+                "response": response.text
             }), 500
             
     except Exception as e:
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "error_type": type(e).__name__
         }), 500
+
+
+@app.route('/restart/test', methods=['GET'])
+def test_restart_config():
+    """Test endpoint to check if restart credentials are configured"""
+    render_api_key = os.environ.get('RENDER_API_KEY')
+    service_id = os.environ.get('RENDER_SERVICE_ID')
+    
+    return jsonify({
+        "has_api_key": bool(render_api_key),
+        "api_key_preview": render_api_key[:8] + "..." if render_api_key else None,
+        "has_service_id": bool(service_id),
+        "service_id": service_id if service_id else None
+    }), 200
 
 
 @app.route('/dashboard', methods=['GET'])

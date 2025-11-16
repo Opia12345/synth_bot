@@ -1,6 +1,6 @@
 pandas
 numpy
-requests
+requests==2.31.0
 websockets==12.0
 pytz
 Flask==3.0.0
