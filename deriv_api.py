@@ -664,7 +664,7 @@ def health_check():
     }), 200
 
 
-@app.route('/restart', methods=['POST'])
+@app.route('/restart', methods=['POST', 'GET'])
 def restart_service():
     """Manual restart endpoint - clears logs and memory"""
     try:
@@ -679,23 +679,54 @@ def restart_service():
                 "has_service_id": bool(service_id)
             }), 500
         
-        import requests as req
+        # Import requests library
+        try:
+            import requests as req
+        except ImportError:
+            return jsonify({
+                "success": False,
+                "error": "requests library not installed",
+                "solution": "Add 'requests' to requirements.txt"
+            }), 500
+        
         url = f"https://api.render.com/v1/services/{service_id}/restarts"
         headers = {
             "Authorization": f"Bearer {render_api_key}",
+            "Accept": "application/json",
             "Content-Type": "application/json"
         }
         
         try:
-            response = req.post(url, headers=headers, timeout=10)
+            response = req.post(url, headers=headers, json={}, timeout=15)
+            
+            # Try to parse response
+            try:
+                response_json = response.json()
+            except:
+                response_json = {"raw_text": response.text}
             
             return jsonify({
-                "success": response.status_code == 201,
+                "success": response.status_code in [200, 201],
                 "status_code": response.status_code,
-                "message": "Server restart initiated" if response.status_code == 201 else "Restart failed",
-                "response_text": response.text,
+                "message": "Server restart initiated" if response.status_code in [200, 201] else "Restart request sent",
+                "response": response_json,
+                "url": url,
+                "headers_sent": {k: v[:20] + "..." if len(v) > 20 else v for k, v in headers.items()}
+            }), 200
+            
+        except req.exceptions.Timeout:
+            return jsonify({
+                "success": False,
+                "error": "Request to Render API timed out",
                 "url": url
-            }), 200 if response.status_code == 201 else 500
+            }), 500
+            
+        except req.exceptions.ConnectionError as e:
+            return jsonify({
+                "success": False,
+                "error": "Could not connect to Render API",
+                "details": str(e)
+            }), 500
             
         except req.exceptions.RequestException as e:
             return jsonify({
@@ -706,10 +737,12 @@ def restart_service():
             }), 500
             
     except Exception as e:
+        import traceback
         return jsonify({
             "success": False,
             "error": str(e),
-            "error_type": type(e).__name__
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
         }), 500
 
 
