@@ -75,17 +75,29 @@ def get_db():
     try:
         conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA journal_mode=WAL')
-        yield conn
-    except:
-        pass
+        conn.execute('PRAGMA journal_mode=WAL') # Optimizes concurrent reads/writes
+        yield conn # Gives the connection object to the 'with' block
+        
+        # 2. CRITICAL FIX: Commit the transaction if the 'with' block finishes without an error
+        conn.commit() 
+        
+    except sqlite3.Error as e:
+        # Best practice: Rollback on error and log/print the issue
+        print(f"Database error: {e}", file=sys.stderr) 
+        if conn:
+            conn.rollback()
+    except Exception as e:
+        # Catch any other unexpected error
+        print(f"Unexpected error in get_db: {e}", file=sys.stderr)
+        
     finally:
         if conn:
             try:
+                # 3. Always close the connection
                 conn.close()
             except:
+                # Ignore errors on close
                 pass
-
 def save_trade(trade_id, trade_data):
     try:
         with get_db() as conn:
