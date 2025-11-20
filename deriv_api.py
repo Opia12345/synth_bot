@@ -1,6 +1,6 @@
 import json
 import websockets
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Thread, Lock
 import uuid
 import asyncio
@@ -45,7 +45,19 @@ def init_db():
                 profit REAL,
                 final_balance REAL,
                 error TEXT,
-                parameters TEXT
+                parameters TEXT,
+                volatility REAL,
+                growth_rate REAL,
+                target_ticks INTEGER
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trading_sessions (
+                session_date TEXT PRIMARY KEY,
+                trades_count INTEGER DEFAULT 0,
+                consecutive_losses INTEGER DEFAULT 0,
+                total_profit_loss REAL DEFAULT 0,
+                stopped INTEGER DEFAULT 0
             )
         ''')
         conn.commit()
@@ -77,8 +89,9 @@ def save_trade(trade_id, trade_data):
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT OR REPLACE INTO trades 
-                    (trade_id, timestamp, app_id, status, success, contract_id, profit, final_balance, error, parameters)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (trade_id, timestamp, app_id, status, success, contract_id, profit, 
+                     final_balance, error, parameters, volatility, growth_rate, target_ticks)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     trade_id,
                     trade_data.get('timestamp'),
@@ -89,7 +102,10 @@ def save_trade(trade_id, trade_data):
                     trade_data.get('profit'),
                     trade_data.get('final_balance'),
                     trade_data.get('error'),
-                    json.dumps(trade_data.get('parameters', {}))
+                    json.dumps(trade_data.get('parameters', {})),
+                    trade_data.get('volatility'),
+                    trade_data.get('growth_rate'),
+                    trade_data.get('target_ticks')
                 ))
                 conn.commit()
     except:
@@ -118,6 +134,33 @@ def get_all_trades():
     except:
         pass
     return []
+
+def get_session_data(session_date):
+    try:
+        with get_db() as conn:
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM trading_sessions WHERE session_date = ?', (session_date,))
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+    except:
+        pass
+    return None
+
+def update_session_data(session_date, trades_count, consecutive_losses, total_profit_loss, stopped):
+    try:
+        with get_db() as conn:
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO trading_sessions 
+                    (session_date, trades_count, consecutive_losses, total_profit_loss, stopped)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (session_date, trades_count, consecutive_losses, total_profit_loss, stopped))
+                conn.commit()
+    except:
+        pass
 
 try:
     init_db()
@@ -154,9 +197,21 @@ class DerivAccumulatorBot:
         self.app_id = app_id
         self.trade_id = trade_id
         self.stake_per_trade = parameters.get('stake', 10.0)
-        self.target_ticks = parameters.get('target_ticks', 1)
-        self.accumulator_range = parameters.get('growth_rate', 0.03)
-        self.symbol = parameters.get('symbol', '1HZ10V')
+        self.symbol = parameters.get('symbol', '1HZ25V')  # Changed default to lower volatility
+        self.mode = parameters.get('mode', 'adaptive')  # 'adaptive' or 'fixed'
+        self.fixed_growth_rate = parameters.get('growth_rate', 0.015)  # 1.5% default
+        self.fixed_target_ticks = parameters.get('target_ticks', 5)
+        
+        # Risk management settings
+        self.max_daily_trades = parameters.get('max_daily_trades', 10)
+        self.max_consecutive_losses = parameters.get('max_consecutive_losses', 3)
+        self.daily_loss_limit_pct = parameters.get('daily_loss_limit_pct', 0.05)  # 5% of balance
+        
+        # Determined dynamically
+        self.growth_rate = None
+        self.target_ticks = None
+        self.volatility = None
+        
         self.ws_urls = [
             f"wss://ws.derivws.com/websockets/v3?app_id={app_id}",
             f"wss://wscluster1.deriv.com/websockets/v3?app_id={app_id}",
@@ -166,6 +221,7 @@ class DerivAccumulatorBot:
         self.ws = None
         self.request_id = 0
         self.account_balance = 0.0
+        self.initial_balance = 0.0
         self.symbol_available = False
         self.contract_type = "ACCU"
         
@@ -224,6 +280,7 @@ class DerivAccumulatorBot:
             
             if "authorize" in data:
                 self.account_balance = float(data['authorize']['balance'])
+                self.initial_balance = self.account_balance
                 return True
         except:
             pass
@@ -240,6 +297,132 @@ class DerivAccumulatorBot:
         except:
             pass
         return self.account_balance
+    
+    async def analyze_volatility(self, periods=30):
+        """Analyze recent tick volatility to determine market conditions"""
+        try:
+            ticks_request = {
+                "ticks_history": self.symbol,
+                "count": periods,
+                "end": "latest",
+                "style": "ticks",
+                "req_id": self.get_next_request_id()
+            }
+            response = await self.send_request(ticks_request)
+            
+            if response and "history" in response:
+                prices = [float(p) for p in response["history"]["prices"]]
+                if len(prices) >= 2:
+                    # Calculate percentage changes
+                    changes = [(prices[i] - prices[i-1]) / prices[i-1] * 100 
+                              for i in range(1, len(prices))]
+                    
+                    # Calculate standard deviation of changes
+                    mean = sum(changes) / len(changes)
+                    variance = sum((c - mean) ** 2 for c in changes) / len(changes)
+                    std_dev = (variance ** 0.5)
+                    
+                    return std_dev
+        except:
+            pass
+        return None
+    
+    async def select_optimal_growth_rate(self):
+        """Choose growth rate based on current volatility"""
+        volatility = await self.analyze_volatility()
+        
+        if volatility is None:
+            return 0.015  # Default 1.5%
+        
+        self.volatility = volatility
+        
+        # Dynamic growth rate based on volatility
+        # Lower volatility = higher growth rate (tighter bands)
+        # Higher volatility = lower growth rate (wider bands)
+        if volatility < 0.3:
+            return 0.03  # 3% - very low volatility
+        elif volatility < 0.6:
+            return 0.02  # 2% - low volatility
+        elif volatility < 1.0:
+            return 0.015  # 1.5% - moderate
+        elif volatility < 1.5:
+            return 0.01  # 1% - moderate-high
+        else:
+            return 0.005  # 0.5% - high volatility
+    
+    def calculate_target_ticks(self, growth_rate):
+        """Calculate optimal target ticks based on growth rate"""
+        # Higher growth rates = shorter duration (fewer ticks)
+        # Lower growth rates = longer duration (more ticks)
+        if growth_rate >= 0.025:
+            return 3
+        elif growth_rate >= 0.018:
+            return 5
+        elif growth_rate >= 0.012:
+            return 7
+        elif growth_rate >= 0.008:
+            return 10
+        else:
+            return 12
+    
+    async def check_trading_conditions(self):
+        """Check if trading should proceed based on session limits"""
+        today = datetime.now().date().isoformat()
+        session = get_session_data(today)
+        
+        if not session:
+            # Initialize session
+            update_session_data(today, 0, 0, 0.0, 0)
+            return True, "New session started"
+        
+        # Check if already stopped for the day
+        if session['stopped']:
+            return False, "Trading stopped for today due to limits"
+        
+        # Check max daily trades
+        if session['trades_count'] >= self.max_daily_trades:
+            update_session_data(today, session['trades_count'], 
+                              session['consecutive_losses'], 
+                              session['total_profit_loss'], 1)
+            return False, f"Max daily trades reached ({self.max_daily_trades})"
+        
+        # Check consecutive losses
+        if session['consecutive_losses'] >= self.max_consecutive_losses:
+            update_session_data(today, session['trades_count'], 
+                              session['consecutive_losses'], 
+                              session['total_profit_loss'], 1)
+            return False, f"Max consecutive losses reached ({self.max_consecutive_losses})"
+        
+        # Check daily loss limit
+        daily_loss_limit = self.initial_balance * self.daily_loss_limit_pct
+        if session['total_profit_loss'] <= -daily_loss_limit:
+            update_session_data(today, session['trades_count'], 
+                              session['consecutive_losses'], 
+                              session['total_profit_loss'], 1)
+            return False, f"Daily loss limit reached ({daily_loss_limit:.2f})"
+        
+        return True, "Trading conditions OK"
+    
+    def update_session_after_trade(self, profit):
+        """Update session data after trade completion"""
+        today = datetime.now().date().isoformat()
+        session = get_session_data(today) or {
+            'trades_count': 0, 
+            'consecutive_losses': 0, 
+            'total_profit_loss': 0.0,
+            'stopped': 0
+        }
+        
+        new_trades_count = session['trades_count'] + 1
+        new_total_pl = session['total_profit_loss'] + profit
+        
+        if profit <= 0:
+            new_consecutive_losses = session['consecutive_losses'] + 1
+        else:
+            new_consecutive_losses = 0  # Reset on win
+        
+        update_session_data(today, new_trades_count, new_consecutive_losses, 
+                          new_total_pl, session['stopped'])
     
     async def validate_symbol(self):
         try:
@@ -290,6 +473,14 @@ class DerivAccumulatorBot:
                 if not await self.validate_symbol():
                     return None, "Symbol validation failed"
             
+            # Determine growth rate and target ticks
+            if self.mode == 'adaptive':
+                self.growth_rate = await self.select_optimal_growth_rate()
+                self.target_ticks = self.calculate_target_ticks(self.growth_rate)
+            else:
+                self.growth_rate = self.fixed_growth_rate
+                self.target_ticks = self.fixed_target_ticks
+            
             proposal_request = {
                 "proposal": 1,
                 "amount": self.stake_per_trade,
@@ -297,7 +488,7 @@ class DerivAccumulatorBot:
                 "contract_type": self.contract_type,
                 "currency": "USD",
                 "symbol": self.symbol,
-                "growth_rate": self.accumulator_range
+                "growth_rate": self.growth_rate
             }
             
             proposal_response = await self.send_request(proposal_request)
@@ -328,10 +519,11 @@ class DerivAccumulatorBot:
             }
             await self.ws.send(json.dumps(proposal_request))
             tick_count = 0
+            max_profit = 0
             
             while True:
                 try:
-                    response = await asyncio.wait_for(self.ws.recv(), timeout=20.0) 
+                    response = await asyncio.wait_for(self.ws.recv(), timeout=30.0) 
                     data = json.loads(response)
                     
                     if "proposal_open_contract" in data:
@@ -350,13 +542,30 @@ class DerivAccumulatorBot:
                             return {
                                 "profit": profit,
                                 "status": "win" if profit > 0 else "loss",
-                                "contract_id": contract_id
+                                "contract_id": contract_id,
+                                "ticks_completed": tick_count
                             }
+                        
+                        # Track profit and ticks
+                        current_profit = float(contract.get("profit", 0))
+                        max_profit = max(max_profit, current_profit)
                         
                         if contract.get("entry_spot"):
                             tick_count += 1
 
+                        # Exit conditions
+                        # 1. Reached target ticks
                         if tick_count >= self.target_ticks:
+                            sell_request = {
+                                "sell": contract_id,
+                                "price": 0.0,
+                                "req_id": self.get_next_request_id()
+                            }
+                            await self.send_request(sell_request)
+                        
+                        # 2. Profit target reached (2% return on stake)
+                        profit_target = self.stake_per_trade * 0.02
+                        if current_profit >= profit_target:
                             sell_request = {
                                 "sell": contract_id,
                                 "price": 0.0,
@@ -380,13 +589,25 @@ class DerivAccumulatorBot:
                 'status': 'running',
                 'parameters': {
                     'stake': self.stake_per_trade,
-                    'target_ticks': self.target_ticks,
-                    'growth_rate': self.accumulator_range,
-                    'symbol': self.symbol
+                    'symbol': self.symbol,
+                    'mode': self.mode
                 }
             })
             
             await self.connect()
+            
+            # Check trading conditions
+            can_trade, reason = await self.check_trading_conditions()
+            if not can_trade:
+                result = {
+                    "success": False,
+                    "error": reason,
+                    "trade_id": self.trade_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "status": "completed"
+                }
+                save_trade(self.trade_id, result)
+                return result
             
             if not await self.validate_symbol():
                 result = {
@@ -414,6 +635,9 @@ class DerivAccumulatorBot:
             monitor_result = await self.monitor_contract(contract_id)
             balance = await self.get_balance()
             
+            # Update session after trade
+            self.update_session_after_trade(monitor_result.get("profit", 0))
+            
             result = {
                 "success": True,
                 "trade_id": self.trade_id,
@@ -423,11 +647,16 @@ class DerivAccumulatorBot:
                 "final_balance": balance,
                 "timestamp": datetime.now().isoformat(),
                 "app_id": self.app_id,
+                "volatility": self.volatility,
+                "growth_rate": self.growth_rate,
+                "target_ticks": self.target_ticks,
                 "parameters": {
                     'stake': self.stake_per_trade,
-                    'target_ticks': self.target_ticks,
-                    'growth_rate': self.accumulator_range,
-                    'symbol': self.symbol
+                    'symbol': self.symbol,
+                    'mode': self.mode,
+                    'growth_rate_used': self.growth_rate,
+                    'target_ticks_used': self.target_ticks,
+                    'volatility_detected': self.volatility
                 }
             }
             save_trade(self.trade_id, result)
@@ -456,17 +685,10 @@ class DerivAccumulatorBot:
             gc.collect()
 
 
-def run_async_trade_in_thread(api_token, app_id, stake, target_ticks, growth_rate, symbol, trade_id):
+def run_async_trade_in_thread(api_token, app_id, parameters, trade_id):
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
-        parameters = {
-            'stake': stake,
-            'target_ticks': target_ticks,
-            'growth_rate': growth_rate,
-            'symbol': symbol
-        }
         
         bot = DerivAccumulatorBot(api_token, app_id, trade_id, parameters)
         loop.run_until_complete(bot.execute_trade_async())
@@ -492,24 +714,32 @@ def execute_trade(app_id, api_token):
             }), 429
         
         data = request.get_json(silent=True) or {}
-        stake = float(data.get('stake', 10.0))
-        target_ticks = int(data.get('target_ticks', 1))
-        growth_rate = float(data.get('growth_rate', 0.03))
-        symbol = data.get('symbol', '1HZ10V')
+        
+        # Build parameters dict
+        parameters = {
+            'stake': float(data.get('stake', 10.0)),
+            'symbol': data.get('symbol', '1HZ25V'),
+            'mode': data.get('mode', 'adaptive'),  # 'adaptive' or 'fixed'
+            'growth_rate': float(data.get('growth_rate', 0.015)),  # Used in 'fixed' mode
+            'target_ticks': int(data.get('target_ticks', 5)),  # Used in 'fixed' mode
+            'max_daily_trades': int(data.get('max_daily_trades', 10)),
+            'max_consecutive_losses': int(data.get('max_consecutive_losses', 3)),
+            'daily_loss_limit_pct': float(data.get('daily_loss_limit_pct', 0.05))
+        }
         
         new_trade_id = str(uuid.uuid4())
         initial_data = {
             "status": "pending", 
             "timestamp": datetime.now().isoformat(),
             "app_id": app_id,
-            "parameters": {'stake': stake, 'target_ticks': target_ticks, 'growth_rate': growth_rate, 'symbol': symbol}
+            "parameters": parameters
         }
         save_trade(new_trade_id, initial_data)
         trade_results[new_trade_id] = initial_data
 
         thread = Thread(
             target=run_async_trade_in_thread,
-            args=(api_token, app_id, stake, target_ticks, growth_rate, symbol, new_trade_id)
+            args=(api_token, app_id, parameters, new_trade_id)
         )
         thread.daemon = True
         thread.start()
@@ -542,10 +772,47 @@ def get_trade_result(trade_id):
             "amount": abs(profit),
             "contract_id": result.get('contract_id'),
             "final_balance": result.get('final_balance'),
+            "volatility": result.get('volatility'),
+            "growth_rate": result.get('growth_rate'),
+            "target_ticks": result.get('target_ticks'),
             "error_details": result.get('error')
         })
     
     return jsonify(response), 200
+
+
+@app.route('/session', methods=['GET'])
+def get_session_status():
+    """Get current session trading status"""
+    today = datetime.now().date().isoformat()
+    session = get_session_data(today)
+    
+    if not session:
+        return jsonify({
+            "session_date": today,
+            "trades_count": 0,
+            "consecutive_losses": 0,
+            "total_profit_loss": 0.0,
+            "stopped": False,
+            "message": "No trades today"
+        }), 200
+    
+    return jsonify({
+        "session_date": today,
+        "trades_count": session['trades_count'],
+        "consecutive_losses": session['consecutive_losses'],
+        "total_profit_loss": round(session['total_profit_loss'], 2),
+        "stopped": bool(session['stopped']),
+        "can_trade": not bool(session['stopped'])
+    }), 200
+
+
+@app.route('/session/reset', methods=['POST'])
+def reset_session():
+    """Reset today's session (use with caution)"""
+    today = datetime.now().date().isoformat()
+    update_session_data(today, 0, 0, 0.0, 0)
+    return jsonify({"message": "Session reset successfully", "date": today}), 200
 
 
 @app.route('/trades', methods=['GET'])
@@ -569,6 +836,10 @@ def get_all_trades_endpoint():
     wins = [t for t in completed if t.get('profit', 0) > 0]
     losses = [t for t in completed if t.get('profit', 0) <= 0]
     
+    # Calculate average volatility and growth rate
+    avg_volatility = sum(t.get('volatility', 0) or 0 for t in completed) / len(completed) if completed else 0
+    avg_growth_rate = sum(t.get('growth_rate', 0) or 0 for t in completed) / len(completed) if completed else 0
+    
     trades_dict = {t['trade_id']: dict(t) for t in filtered_trades}
     
     return jsonify({
@@ -580,6 +851,8 @@ def get_all_trades_endpoint():
         "losses": len(losses),
         "win_rate": f"{(len(wins)/len(completed)*100):.2f}%" if completed else "0%",
         "total_profit_loss": round(total_profit, 2),
+        "avg_volatility": round(avg_volatility, 4),
+        "avg_growth_rate": round(avg_growth_rate, 4),
         "trades": trades_dict
     }), 200
 
@@ -619,7 +892,9 @@ def get_trades_summary():
                 "timestamp": t.get('timestamp'),
                 "profit": t.get('profit', 0),
                 "result": "WIN" if t.get('profit', 0) > 0 else "LOSS",
-                "contract_id": t.get('contract_id')
+                "contract_id": t.get('contract_id'),
+                "volatility": t.get('volatility'),
+                "growth_rate": t.get('growth_rate')
             }
             for t in sorted(completed, key=lambda x: x.get('timestamp', ''), reverse=True)[:10]
         ]
@@ -634,7 +909,7 @@ def export_trades():
     if not completed:
         return jsonify({"message": "No completed trades to export"}), 200
     
-    csv_lines = ["Trade_ID,Timestamp,Contract_ID,Profit_Loss,Result,Final_Balance"]
+    csv_lines = ["Trade_ID,Timestamp,Contract_ID,Profit_Loss,Result,Final_Balance,Volatility,Growth_Rate,Target_Ticks"]
     
     for trade in sorted(completed, key=lambda x: x.get('timestamp', '')):
         profit = trade.get('profit', 0)
@@ -644,7 +919,10 @@ def export_trades():
             f"{trade.get('contract_id', 'N/A')},"
             f"{profit:.2f},"
             f"{'WIN' if profit > 0 else 'LOSS'},"
-            f"{trade.get('final_balance', 'N/A')}"
+            f"{trade.get('final_balance', 'N/A')},"
+            f"{trade.get('volatility', 'N/A')},"
+            f"{trade.get('growth_rate', 'N/A')},"
+            f"{trade.get('target_ticks', 'N/A')}"
         )
     
     return "\n".join(csv_lines), 200, {
@@ -687,7 +965,6 @@ def restart_service():
                 "error": "requests library not installed"
             }), 500
         
-        # Try the correct Render API endpoint - it's a deploy, not restart
         url = f"https://api.render.com/v1/services/{service_id}/deploys"
         headers = {
             "Authorization": f"Bearer {render_api_key}",
@@ -695,9 +972,8 @@ def restart_service():
             "Content-Type": "application/json"
         }
         
-        # Trigger a new deploy (which restarts the service)
         payload = {
-            "clearCache": "clear"  # This clears build cache and restarts
+            "clearCache": "clear"
         }
         
         try:
@@ -774,14 +1050,23 @@ def dashboard():
         .refresh-btn:hover { background: #2980b9; }
         .export-btn { background: #27ae60; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin-left: 10px; }
         .export-btn:hover { background: #229954; }
+        .session-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .session-status { display: inline-block; padding: 5px 15px; border-radius: 20px; font-weight: bold; }
+        .session-active { background: #27ae60; color: white; }
+        .session-stopped { background: #e74c3c; color: white; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>📊 Deriv Trading Dashboard</h1>
-            <p>Real-time trading performance monitoring</p>
+            <h1>📊 Deriv Trading Dashboard (Enhanced)</h1>
+            <p>Real-time trading performance monitoring with adaptive strategy</p>
             <p id="currentDate" style="margin-top: 10px; font-size: 14px;"></p>
+        </div>
+        
+        <div class="session-card" id="sessionCard">
+            <h3>Today's Session Status</h3>
+            <div id="sessionStatus"></div>
         </div>
         
         <div style="margin-bottom: 20px;">
@@ -802,9 +1087,11 @@ def dashboard():
                         <th>Timestamp</th>
                         <th>Trade ID</th>
                         <th>Contract ID</th>
+                        <th>Volatility</th>
+                        <th>Growth Rate</th>
+                        <th>Ticks</th>
                         <th>Profit/Loss</th>
                         <th>Result</th>
-                        <th>Final Balance</th>
                     </tr>
                 </thead>
                 <tbody id="tradesBody"></tbody>
@@ -817,6 +1104,26 @@ def dashboard():
         function changeFilter() {
             currentFilter = document.getElementById('filterSelect').value;
             loadData();
+        }
+        
+        async function loadSession() {
+            try {
+                const response = await fetch('/session');
+                const data = await response.json();
+                
+                const statusClass = data.stopped ? 'session-stopped' : 'session-active';
+                const statusText = data.stopped ? 'STOPPED' : 'ACTIVE';
+                
+                const sessionHtml = `
+                    <p><span class="session-status ${statusClass}">${statusText}</span></p>
+                    <p><strong>Trades Today:</strong> ${data.trades_count}</p>
+                    <p><strong>Consecutive Losses:</strong> ${data.consecutive_losses}</p>
+                    <p><strong>Total P/L:</strong> <span class="${data.total_profit_loss >= 0 ? 'win' : 'loss'}">${data.total_profit_loss.toFixed(2)}</span></p>
+                `;
+                document.getElementById('sessionStatus').innerHTML = sessionHtml;
+            } catch (error) {
+                console.error('Error loading session:', error);
+            }
         }
         
         async function loadData() {
@@ -860,6 +1167,14 @@ def dashboard():
                             ${data.total_profit_loss.toFixed(2)}
                         </div>
                     </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Avg Volatility</div>
+                        <div class="stat-value">${(data.avg_volatility || 0).toFixed(3)}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Avg Growth Rate</div>
+                        <div class="stat-value">${((data.avg_growth_rate || 0) * 100).toFixed(2)}%</div>
+                    </div>
                 `;
                 document.getElementById('stats').innerHTML = statsHtml;
                 
@@ -876,14 +1191,16 @@ def dashboard():
                             <td>${new Date(trade.timestamp).toLocaleString()}</td>
                             <td>${id.substring(0, 8)}...</td>
                             <td>${trade.contract_id || 'N/A'}</td>
+                            <td>${(trade.volatility || 0).toFixed(3)}</td>
+                            <td>${((trade.growth_rate || 0) * 100).toFixed(2)}%</td>
+                            <td>${trade.target_ticks || 'N/A'}</td>
                             <td class="${resultClass}">${profit.toFixed(2)}</td>
                             <td class="${resultClass}">${resultText}</td>
-                            <td>${(trade.final_balance || 0).toFixed(2)}</td>
                         </tr>
                     `;
                 }).join('');
                 
-                document.getElementById('tradesBody').innerHTML = tradesHtml || '<tr><td colspan="6">No completed trades yet</td></tr>';
+                document.getElementById('tradesBody').innerHTML = tradesHtml || '<tr><td colspan="8">No completed trades yet</td></tr>';
             } catch (error) {
                 console.error('Error loading data:', error);
             }
@@ -893,8 +1210,12 @@ def dashboard():
             window.location.href = '/trades/export';
         }
         
+        loadSession();
         loadData();
-        setInterval(loadData, 10000);
+        setInterval(() => {
+            loadSession();
+            loadData();
+        }, 10000);
     </script>
 </body>
 </html>"""
