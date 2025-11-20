@@ -943,35 +943,39 @@ def get_all_trades_endpoint():
     else:
         filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
     
-    # Fixed: Count ALL trades with proper status
+    # FIX: Use 'completed' as the base for all win/loss statistics
     completed = [t for t in filtered_trades if t.get('status') == 'completed']
-    successful = [t for t in completed if (t.get('success') == 1 or t.get('success') is True)]
     
-    total_profit = sum(t.get('profit', 0) for t in successful)
-    wins = [t for t in successful if t.get('profit', 0) > 0]
-    losses = [t for t in successful if t.get('profit', 0) <= 0]
-    
-    # Calculate averages
-    avg_volatility = sum(t.get('volatility', 0) or 0 for t in successful) / len(successful) if successful else 0
-    avg_growth_rate = sum(t.get('growth_rate', 0) or 0 for t in successful) / len(successful) if successful else 0
+    # Calculate Wins, Losses, and Profit from ALL completed trades
+    wins = [t for t in completed if t.get('profit', 0) > 0]
+    losses = [t for t in completed if t.get('profit', 0) <= 0]
+    total_profit = sum(t.get('profit', 0) for t in completed)
+
+    # Calculate averages from ALL completed trades
+    avg_volatility = sum(t.get('volatility', 0) or 0 for t in completed) / len(completed) if completed else 0
+    avg_growth_rate = sum(t.get('growth_rate', 0) or 0 for t in completed) / len(completed) if completed else 0
     
     # Include exit reasons analysis
     exit_reasons = {}
-    for t in successful:
+    for t in completed:
         reason = t.get('exit_reason', 'unknown')
         exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
     
     trades_dict = {t['trade_id']: dict(t) for t in filtered_trades}
     
+    if len(completed) > 0:
+        win_rate = f"{(len(wins)/len(completed)*100):.2f}%"
+    else:
+        win_rate = "0%"
+
     return jsonify({
         "filter": filter_by,
         "date": today.isoformat(),
         "total_trades": len(filtered_trades),
         "completed_trades": len(completed),
-        "successful_trades": len(successful),
         "wins": len(wins),
         "losses": len(losses),
-        "win_rate": f"{(len(wins)/len(successful)*100):.2f}%" if successful else "0%",
+        "win_rate": win_rate,
         "total_profit_loss": round(total_profit, 2),
         "avg_volatility": round(avg_volatility, 4),
         "avg_growth_rate": round(avg_growth_rate, 4),
@@ -979,11 +983,11 @@ def get_all_trades_endpoint():
         "trades": trades_dict
     }), 200
 
-
 @app.route('/trades/summary', methods=['GET'])
 def get_trades_summary():
     all_trades = get_all_trades()
-    completed = [t for t in all_trades if t.get('status') == 'completed' and (t.get('success') or t.get('success') == 1)]
+    # FIX: Include all completed trades, not just successful ones
+    completed = [t for t in all_trades if t.get('status') == 'completed']
     
     if not completed:
         return jsonify({"message": "No completed trades yet", "total_trades": len(all_trades)}), 200
@@ -1032,11 +1036,10 @@ def get_trades_summary():
         ]
     }), 200
 
-
 @app.route('/trades/export', methods=['GET'])
 def export_trades():
     all_trades = get_all_trades()
-    completed = [t for t in all_trades if t.get('status') == 'completed' and (t.get('success') or t.get('success') == 1)]
+    completed = [t for t in all_trades if t.get('status') == 'completed']
     
     if not completed:
         return jsonify({"message": "No completed trades to export"}), 200
@@ -1064,7 +1067,6 @@ def export_trades():
         'Content-Type': 'text/csv',
         'Content-Disposition': 'attachment; filename=trades.csv'
     }
-
 
 @app.route('/health', methods=['GET'])
 def health_check():
