@@ -99,37 +99,33 @@ def get_db():
                 # Ignore errors on close
                 pass
 def save_trade(trade_id, trade_data):
-    try:
-        with get_db() as conn:
-            if conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT OR REPLACE INTO trades 
-                    (trade_id, timestamp, app_id, status, success, contract_id, profit, 
-                     final_balance, error, parameters, volatility, growth_rate, target_ticks,
-                     exit_reason, max_profit_reached, ticks_completed)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    trade_id,
-                    trade_data.get('timestamp'),
-                    trade_data.get('app_id'),
-                    trade_data.get('status'),
-                    1 if trade_data.get('success') else 0,
-                    trade_data.get('contract_id'),
-                    trade_data.get('profit'),
-                    trade_data.get('final_balance'),
-                    trade_data.get('error'),
-                    json.dumps(trade_data.get('parameters', {})),
-                    trade_data.get('volatility'),
-                    trade_data.get('growth_rate'),
-                    trade_data.get('target_ticks'),
-                    trade_data.get('exit_reason'),
-                    trade_data.get('max_profit_reached'),
-                    trade_data.get('ticks_completed')
-                ))
-                conn.commit()
-    except:
-        pass
+    with get_db() as conn:
+        if conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO trades 
+                (trade_id, timestamp, app_id, status, success, contract_id, profit, 
+                 final_balance, error, parameters, volatility, growth_rate, target_ticks,
+                 exit_reason, max_profit_reached, ticks_completed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                trade_id,
+                trade_data.get('timestamp'),
+                trade_data.get('app_id'),
+                trade_data.get('status'),
+                1 if trade_data.get('success') else 0,
+                trade_data.get('contract_id'),
+                trade_data.get('profit'),
+                trade_data.get('final_balance'),
+                trade_data.get('error'),
+                json.dumps(trade_data.get('parameters', {})),
+                trade_data.get('volatility'),
+                trade_data.get('growth_rate'),
+                trade_data.get('target_ticks'),
+                trade_data.get('exit_reason'),
+                trade_data.get('max_profit_reached'),
+                trade_data.get('ticks_completed')
+            ))
 
 def get_trade(trade_id):
     try:
