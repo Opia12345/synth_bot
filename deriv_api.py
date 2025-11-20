@@ -75,57 +75,52 @@ def get_db():
     try:
         conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA journal_mode=WAL') # Optimizes concurrent reads/writes
-        yield conn # Gives the connection object to the 'with' block
-        
-        # 2. CRITICAL FIX: Commit the transaction if the 'with' block finishes without an error
-        conn.commit() 
-        
+        conn.execute('PRAGMA journal_mode=WAL')
+        yield conn
+        conn.commit()  # CRITICAL: Always commit after successful operations
     except sqlite3.Error as e:
-        # Best practice: Rollback on error and log/print the issue
-        print(f"Database error: {e}", file=sys.stderr) 
         if conn:
             conn.rollback()
     except Exception as e:
-        # Catch any other unexpected error
-        print(f"Unexpected error in get_db: {e}", file=sys.stderr)
-        
+        pass
     finally:
         if conn:
             try:
-                # 3. Always close the connection
                 conn.close()
             except:
-                # Ignore errors on close
                 pass
+
 def save_trade(trade_id, trade_data):
-    with get_db() as conn:
-        if conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO trades 
-                (trade_id, timestamp, app_id, status, success, contract_id, profit, 
-                 final_balance, error, parameters, volatility, growth_rate, target_ticks,
-                 exit_reason, max_profit_reached, ticks_completed)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                trade_id,
-                trade_data.get('timestamp'),
-                trade_data.get('app_id'),
-                trade_data.get('status'),
-                1 if trade_data.get('success') else 0,
-                trade_data.get('contract_id'),
-                trade_data.get('profit'),
-                trade_data.get('final_balance'),
-                trade_data.get('error'),
-                json.dumps(trade_data.get('parameters', {})),
-                trade_data.get('volatility'),
-                trade_data.get('growth_rate'),
-                trade_data.get('target_ticks'),
-                trade_data.get('exit_reason'),
-                trade_data.get('max_profit_reached'),
-                trade_data.get('ticks_completed')
-            ))
+    try:
+        with get_db() as conn:
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO trades 
+                    (trade_id, timestamp, app_id, status, success, contract_id, profit, 
+                     final_balance, error, parameters, volatility, growth_rate, target_ticks,
+                     exit_reason, max_profit_reached, ticks_completed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    trade_id,
+                    trade_data.get('timestamp'),
+                    trade_data.get('app_id'),
+                    trade_data.get('status'),
+                    1 if trade_data.get('success') else 0,
+                    trade_data.get('contract_id'),
+                    trade_data.get('profit'),
+                    trade_data.get('final_balance'),
+                    trade_data.get('error'),
+                    json.dumps(trade_data.get('parameters', {})),
+                    trade_data.get('volatility'),
+                    trade_data.get('growth_rate'),
+                    trade_data.get('target_ticks'),
+                    trade_data.get('exit_reason'),
+                    trade_data.get('max_profit_reached'),
+                    trade_data.get('ticks_completed')
+                ))
+    except Exception as e:
+        pass
 
 def get_trade(trade_id):
     try:
@@ -174,7 +169,6 @@ def update_session_data(session_date, trades_count, consecutive_losses, total_pr
                     (session_date, trades_count, consecutive_losses, total_profit_loss, stopped)
                     VALUES (?, ?, ?, ?, ?)
                 ''', (session_date, trades_count, consecutive_losses, total_profit_loss, stopped))
-                conn.commit()
     except:
         pass
 
@@ -212,25 +206,22 @@ class DerivAccumulatorBot:
         self.api_token = api_token
         self.app_id = app_id
         self.trade_id = trade_id
-        self.stake_per_trade = parameters.get('stake', 5.0)  # Reduced default stake
-        self.symbol = parameters.get('symbol', '1HZ10V')  # Lower volatility default
+        self.stake_per_trade = parameters.get('stake', 5.0)
+        self.symbol = parameters.get('symbol', '1HZ10V')
         self.mode = parameters.get('mode', 'adaptive')
-        self.fixed_growth_rate = parameters.get('growth_rate', 0.02)  # 2% default
+        self.fixed_growth_rate = parameters.get('growth_rate', 0.02)
         self.fixed_target_ticks = parameters.get('target_ticks', 4)
         
-        # Enhanced risk management
         self.max_daily_trades = parameters.get('max_daily_trades', 15)
         self.max_consecutive_losses = parameters.get('max_consecutive_losses', 3)
-        self.daily_loss_limit_pct = parameters.get('daily_loss_limit_pct', 0.03)  # 3%
+        self.daily_loss_limit_pct = parameters.get('daily_loss_limit_pct', 0.03)
         
-        # Dynamic exit settings
-        self.profit_target_pct = parameters.get('profit_target_pct', 0.25)  # 25% return
-        self.stop_loss_pct = parameters.get('stop_loss_pct', 0.5)  # 50% of stake
-        self.trailing_stop_pct = parameters.get('trailing_stop_pct', 0.3)  # 30% from peak
+        self.profit_target_pct = parameters.get('profit_target_pct', 0.25)
+        self.stop_loss_pct = parameters.get('stop_loss_pct', 0.5)
+        self.trailing_stop_pct = parameters.get('trailing_stop_pct', 0.3)
         
-        # Volatility monitoring
-        self.volatility_check_interval = parameters.get('volatility_check_interval', 3)  # Check every 3 ticks
-        self.volatility_exit_threshold = parameters.get('volatility_exit_threshold', 2.0)  # 2x initial
+        self.volatility_check_interval = parameters.get('volatility_check_interval', 3)
+        self.volatility_exit_threshold = parameters.get('volatility_exit_threshold', 2.0)
         
         self.growth_rate = None
         self.target_ticks = None
@@ -250,7 +241,6 @@ class DerivAccumulatorBot:
         self.symbol_available = False
         self.contract_type = "ACCU"
         
-        # Track recent prices for real-time volatility
         self.price_history = deque(maxlen=20)
         
     def get_next_request_id(self):
@@ -327,7 +317,6 @@ class DerivAccumulatorBot:
         return self.account_balance
     
     async def analyze_volatility(self, periods=30):
-        """Analyze recent tick volatility"""
         try:
             ticks_request = {
                 "ticks_history": self.symbol,
@@ -354,7 +343,6 @@ class DerivAccumulatorBot:
         return None
     
     def calculate_realtime_volatility(self):
-        """Calculate volatility from recent price movements during trade"""
         if len(self.price_history) < 3:
             return None
         
@@ -367,7 +355,6 @@ class DerivAccumulatorBot:
         return (variance ** 0.5)
     
     async def select_optimal_growth_rate(self):
-        """Choose growth rate based on volatility"""
         volatility = await self.analyze_volatility()
         
         if volatility is None:
@@ -376,20 +363,18 @@ class DerivAccumulatorBot:
         self.volatility = volatility
         self.initial_volatility = volatility
         
-        # Optimized growth rates for profitability
         if volatility < 0.25:
-            return 0.04  # 4% - very low volatility
+            return 0.04
         elif volatility < 0.5:
-            return 0.03  # 3% - low volatility
+            return 0.03
         elif volatility < 0.8:
-            return 0.02  # 2% - moderate
+            return 0.02
         elif volatility < 1.2:
-            return 0.015  # 1.5% - moderate-high
+            return 0.015
         else:
-            return 0.01  # 1% - high volatility
+            return 0.01
     
     def calculate_target_ticks(self, growth_rate):
-        """Calculate target ticks - optimized for profitability"""
         if growth_rate >= 0.035:
             return 3
         elif growth_rate >= 0.025:
@@ -402,7 +387,6 @@ class DerivAccumulatorBot:
             return 8
     
     async def check_trading_conditions(self):
-        """Check if trading should proceed"""
         today = datetime.now().date().isoformat()
         session = get_session_data(today)
         
@@ -435,7 +419,6 @@ class DerivAccumulatorBot:
         return True, "Trading conditions OK"
     
     def update_session_after_trade(self, profit):
-        """Update session data after trade"""
         today = datetime.now().date().isoformat()
         session = get_session_data(today) or {
             'trades_count': 0, 
@@ -589,19 +572,16 @@ class DerivAccumulatorBot:
                         current_profit = float(contract.get("profit", 0))
                         max_profit = max(max_profit, current_profit)
                         
-                        # Track current spot price for volatility
                         if contract.get("current_spot"):
                             self.price_history.append(float(contract["current_spot"]))
                         
                         if contract.get("entry_spot"):
                             tick_count += 1
                         
-                        # Check volatility periodically
                         if tick_count - last_volatility_check >= self.volatility_check_interval:
                             current_volatility = self.calculate_realtime_volatility()
                             last_volatility_check = tick_count
                             
-                            # Exit if volatility spikes significantly
                             if current_volatility and self.initial_volatility:
                                 volatility_ratio = current_volatility / self.initial_volatility
                                 if volatility_ratio > self.volatility_exit_threshold:
@@ -614,8 +594,6 @@ class DerivAccumulatorBot:
                                     await self.send_request(sell_request)
                                     continue
                         
-                        # Exit conditions
-                        # 1. Profit target reached
                         if current_profit >= profit_target:
                             exit_reason = "profit_target"
                             sell_request = {
@@ -626,7 +604,6 @@ class DerivAccumulatorBot:
                             await self.send_request(sell_request)
                             continue
                         
-                        # 2. Stop loss hit
                         if current_profit <= stop_loss:
                             exit_reason = "stop_loss"
                             sell_request = {
@@ -637,7 +614,6 @@ class DerivAccumulatorBot:
                             await self.send_request(sell_request)
                             continue
                         
-                        # 3. Trailing stop from peak
                         if max_profit > 0:
                             trailing_threshold = max_profit * (1 - self.trailing_stop_pct)
                             if current_profit < trailing_threshold:
@@ -650,7 +626,6 @@ class DerivAccumulatorBot:
                                 await self.send_request(sell_request)
                                 continue
                         
-                        # 4. Target ticks reached
                         if tick_count >= self.target_ticks:
                             exit_reason = "target_ticks"
                             sell_request = {
@@ -716,6 +691,7 @@ class DerivAccumulatorBot:
                     "status": "completed"
                 }
                 save_trade(self.trade_id, result)
+                trade_results[self.trade_id] = result
                 return result
             
             if not await self.validate_symbol():
@@ -727,6 +703,7 @@ class DerivAccumulatorBot:
                     "status": "completed"
                 }
                 save_trade(self.trade_id, result)
+                trade_results[self.trade_id] = result
                 return result
             
             contract_id, error = await self.place_accumulator_trade()
@@ -739,6 +716,7 @@ class DerivAccumulatorBot:
                     "status": "completed"
                 }
                 save_trade(self.trade_id, result)
+                trade_results[self.trade_id] = result
                 return result
             
             monitor_result = await self.monitor_contract(contract_id)
@@ -772,6 +750,7 @@ class DerivAccumulatorBot:
                 }
             }
             save_trade(self.trade_id, result)
+            trade_results[self.trade_id] = result
             return result
         except Exception as e:
             result = {
@@ -782,16 +761,12 @@ class DerivAccumulatorBot:
                 "status": "completed"
             }
             save_trade(self.trade_id, result)
+            trade_results[self.trade_id] = result
             return result
         finally:
             if self.ws:
                 try:
                     await self.ws.close()
-                except:
-                    pass
-            if self.trade_id in trade_results:
-                try:
-                    del trade_results[self.trade_id]
                 except:
                     pass
             gc.collect()
@@ -827,10 +802,9 @@ def execute_trade(app_id, api_token):
         
         data = request.get_json(silent=True) or {}
         
-        # Optimized default parameters
         parameters = {
             'stake': float(data.get('stake', 5.0)),
-            'symbol': data.get('symbol', '1HZ10V'),  # Lower volatility
+            'symbol': data.get('symbol', '1HZ10V'),
             'mode': data.get('mode', 'adaptive'),
             'growth_rate': float(data.get('growth_rate', 0.02)),
             'target_ticks': int(data.get('target_ticks', 4)),
@@ -904,7 +878,6 @@ def get_trade_result(trade_id):
 
 @app.route('/session', methods=['GET'])
 def get_session_status():
-    """Get current session trading status"""
     today = datetime.now().date().isoformat()
     session = get_session_data(today)
     
@@ -930,7 +903,6 @@ def get_session_status():
 
 @app.route('/session/reset', methods=['POST'])
 def reset_session():
-    """Reset today's session"""
     today = datetime.now().date().isoformat()
     update_session_data(today, 0, 0, 0.0, 0)
     return jsonify({"message": "Session reset successfully", "date": today}), 200
@@ -951,26 +923,31 @@ def get_all_trades_endpoint():
     else:
         filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
     
-    # FIX: Use 'completed' as the base for all win/loss statistics
+    # Filter only completed trades for statistics
     completed = [t for t in filtered_trades if t.get('status') == 'completed']
     
-    # Calculate Wins, Losses, and Profit from ALL completed trades
+    # Calculate wins and losses from completed trades
     wins = [t for t in completed if t.get('profit', 0) > 0]
     losses = [t for t in completed if t.get('profit', 0) <= 0]
     total_profit = sum(t.get('profit', 0) for t in completed)
-
-    # Calculate averages from ALL completed trades
+    
+    # Calculate averages
     avg_volatility = sum(t.get('volatility', 0) or 0 for t in completed) / len(completed) if completed else 0
     avg_growth_rate = sum(t.get('growth_rate', 0) or 0 for t in completed) / len(completed) if completed else 0
     
-    # Include exit reasons analysis
+    # Exit reasons analysis
     exit_reasons = {}
     for t in completed:
         reason = t.get('exit_reason', 'unknown')
         exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
     
-    trades_dict = {t['trade_id']: dict(t) for t in filtered_trades}
+    # Convert trades to dictionary format
+    trades_dict = {}
+    for t in filtered_trades:
+        trade_dict = dict(t)
+        trades_dict[trade_dict['trade_id']] = trade_dict
     
+    # Calculate win rate
     if len(completed) > 0:
         win_rate = f"{(len(wins)/len(completed)*100):.2f}%"
     else:
@@ -994,7 +971,6 @@ def get_all_trades_endpoint():
 @app.route('/trades/summary', methods=['GET'])
 def get_trades_summary():
     all_trades = get_all_trades()
-    # FIX: Include all completed trades, not just successful ones
     completed = [t for t in all_trades if t.get('status') == 'completed']
     
     if not completed:
@@ -1007,7 +983,6 @@ def get_trades_summary():
     win_amounts = [t.get('profit', 0) for t in wins]
     loss_amounts = [abs(t.get('profit', 0)) for t in losses]
     
-    # Exit reasons breakdown
     exit_reasons = {}
     for t in completed:
         reason = t.get('exit_reason', 'unknown')
@@ -1095,7 +1070,6 @@ def health_check():
 
 @app.route('/config/optimal', methods=['GET'])
 def get_optimal_config():
-    """Return optimal trading configuration"""
     return jsonify({
         "recommended_setup": {
             "description": "Optimized for consistent profitability with risk management",
@@ -1149,7 +1123,6 @@ def get_optimal_config():
 
 @app.route('/restart', methods=['POST', 'GET'])
 def restart_service():
-    """Manual restart endpoint"""
     try:
         render_api_key = os.environ.get('RENDER_API_KEY')
         service_id = os.environ.get('RENDER_SERVICE_ID')
@@ -1217,7 +1190,7 @@ def dashboard():
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; min-height: 100vh; padding: 20px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; min-height: 100vh; padding: 20px; background: #f7fafc; }
         .container { max-width: 1400px; margin: 0 auto; }
         .header { background: white; padding: 30px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         .header h1 { color: #2d3748; font-size: 32px; margin-bottom: 10px; }
@@ -1234,7 +1207,7 @@ def dashboard():
         .session-active { background: #48bb78; color: white; }
         .session-stopped { background: #f56565; color: white; }
         .controls { background: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .btn { padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s; margin-right: 10px; }
+        .btn { padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s; margin-right: 10px; margin-bottom: 10px; }
         .btn-primary { background: #667eea; color: white; }
         .btn-primary:hover { background: #5a67d8; transform: translateY(-1px); }
         .btn-success { background: #48bb78; color: white; }
@@ -1242,7 +1215,7 @@ def dashboard():
         .select { padding: 12px; border-radius: 8px; border: 2px solid #e2e8f0; font-size: 14px; cursor: pointer; }
         .trades-table { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); overflow-x: auto; }
         .trades-table h2 { color: #2d3748; margin-bottom: 20px; font-size: 24px; }
-        table { width: 100%; border-collapse: collapse; }
+        table { width: 100%; border-collapse: collapse; min-width: 800px; }
         th { background: #4a5568; color: white; padding: 14px; text-align: left; font-weight: 600; font-size: 13px; text-transform: uppercase; }
         td { padding: 12px 14px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
         tr:hover { background: #f7fafc; }
@@ -1252,8 +1225,9 @@ def dashboard():
         .badge-success { background: #c6f6d5; color: #22543d; }
         .badge-danger { background: #fed7d7; color: #742a2a; }
         .badge-info { background: #bee3f8; color: #2c5282; }
-        .exit-reasons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; }
+        .exit-reasons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; margin-bottom: 20px; }
         .reason-badge { padding: 8px 16px; background: #edf2f7; border-radius: 8px; font-size: 13px; }
+        .no-data { text-align: center; padding: 40px; color: #718096; font-size: 16px; }
     </style>
 </head>
 <body>
@@ -1266,7 +1240,7 @@ def dashboard():
         
         <div class="session-card" id="sessionCard">
             <h3 style="margin-bottom: 15px; color: #2d3748;">Today's Session Status</h3>
-            <div id="sessionStatus"></div>
+            <div id="sessionStatus">Loading...</div>
         </div>
         
         <div class="controls">
@@ -1279,7 +1253,9 @@ def dashboard():
             </select>
         </div>
         
-        <div class="stats-grid" id="stats"></div>
+        <div class="stats-grid" id="stats">
+            <div class="stat-card"><div class="no-data">Loading stats...</div></div>
+        </div>
         
         <div class="trades-table">
             <h2>📊 Recent Trades</h2>
@@ -1298,7 +1274,9 @@ def dashboard():
                         <th>Result</th>
                     </tr>
                 </thead>
-                <tbody id="tradesBody"></tbody>
+                <tbody id="tradesBody">
+                    <tr><td colspan="9" class="no-data">Loading trades...</td></tr>
+                </tbody>
             </table>
         </div>
     </div>
@@ -1329,12 +1307,16 @@ def dashboard():
                 document.getElementById('sessionStatus').innerHTML = sessionHtml;
             } catch (error) {
                 console.error('Error loading session:', error);
+                document.getElementById('sessionStatus').innerHTML = '<div class="no-data">Error loading session data</div>';
             }
         }
         
         async function loadData() {
             try {
                 const response = await fetch(`/trades?filter=${currentFilter}`);
+                if (!response.ok) {
+                    throw new Error('Failed to fetch trades');
+                }
                 const data = await response.json();
                 
                 const dateStr = new Date(data.date).toLocaleDateString('en-US', { 
@@ -1349,28 +1331,28 @@ def dashboard():
                 const statsHtml = `
                     <div class="stat-card">
                         <div class="stat-label">Total Trades</div>
-                        <div class="stat-value">${data.total_trades}</div>
+                        <div class="stat-value">${data.total_trades || 0}</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Completed</div>
-                        <div class="stat-value">${data.completed_trades}</div>
+                        <div class="stat-value">${data.completed_trades || 0}</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Wins</div>
-                        <div class="stat-value positive">${data.wins}</div>
+                        <div class="stat-value positive">${data.wins || 0}</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Losses</div>
-                        <div class="stat-value negative">${data.losses}</div>
+                        <div class="stat-value negative">${data.losses || 0}</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Win Rate</div>
-                        <div class="stat-value">${data.win_rate}</div>
+                        <div class="stat-value">${data.win_rate || '0%'}</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Total P/L</div>
-                        <div class="stat-value ${data.total_profit_loss >= 0 ? 'positive' : 'negative'}">
-                            ${data.total_profit_loss.toFixed(2)}
+                        <div class="stat-value ${(data.total_profit_loss || 0) >= 0 ? 'positive' : 'negative'}">
+                            ${(data.total_profit_loss || 0).toFixed(2)}
                         </div>
                     </div>
                     <div class="stat-card">
@@ -1391,11 +1373,25 @@ def dashboard():
                             `<div class="reason-badge">${reason.replace(/_/g, ' ')}: ${count}</div>`
                         ).join('');
                     document.getElementById('exitReasons').innerHTML = reasonsHtml;
+                } else {
+                    document.getElementById('exitReasons').innerHTML = '';
+                }
+                
+                if (!data.trades || Object.keys(data.trades).length === 0) {
+                    document.getElementById('tradesBody').innerHTML = 
+                        '<tr><td colspan="9" class="no-data">No trades yet. Start trading to see results here.</td></tr>';
+                    return;
                 }
                 
                 const trades = Object.entries(data.trades)
                     .filter(([_, t]) => t.status === 'completed')
                     .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
+                
+                if (trades.length === 0) {
+                    document.getElementById('tradesBody').innerHTML = 
+                        '<tr><td colspan="9" class="no-data">No completed trades yet</td></tr>';
+                    return;
+                }
                 
                 const tradesHtml = trades.map(([id, trade]) => {
                     const profit = trade.profit || 0;
@@ -1417,7 +1413,7 @@ def dashboard():
                     `;
                 }).join('');
                 
-                document.getElementById('tradesBody').innerHTML = tradesHtml || '<tr><td colspan="9" style="text-align: center; padding: 30px; color: #718096;">No completed trades yet</td></tr>';
+                document.getElementById('tradesBody').innerHTML = tradesHtml;
             } catch (error) {
                 console.error('Error loading data:', error);
             }
