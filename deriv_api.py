@@ -1384,7 +1384,7 @@ def dashboard():
                 }
                 
                 const trades = Object.entries(data.trades)
-                    .filter(([_, t]) => t.status === 'completed' && (t.success || t.success === 1))
+                    .filter(([_, t]) => t.status === 'completed')
                     .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
                 
                 const tradesHtml = trades.map(([id, trade]) => {
@@ -1421,7 +1421,7 @@ def dashboard():
             try {
                 const response = await fetch('/config/optimal');
                 const data = await response.json();
-                alert('Optimal Configuration:\n\n' + JSON.stringify(data.recommended_setup.parameters, null, 2) + '\n\nSee /config/optimal endpoint for more setups');
+                alert('Optimal Configuration:\\n\\n' + JSON.stringify(data.recommended_setup.parameters, null, 2) + '\\n\\nSee /config/optimal endpoint for more setups');
             } catch (error) {
                 console.error('Error fetching config:', error);
             }
@@ -1437,7 +1437,6 @@ def dashboard():
 </body>
 </html>"""
     return html, 200
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
