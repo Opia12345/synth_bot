@@ -1438,7 +1438,7 @@ def dashboard():
         .header h1 { color: #2d3748; font-size: 32px; margin-bottom: 10px; }
         .header p { color: #718096; font-size: 16px; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .stat-card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s; border-left: 4px solid #667eea; }
+        .stat-card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s; }
         .stat-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.2); }
         .stat-label { font-size: 12px; color: #718096; margin-bottom: 8px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; }
         .stat-value { font-size: 28px; font-weight: bold; color: #2d3748; }
@@ -1566,7 +1566,6 @@ def dashboard():
                         <div><strong style="color: #718096;">Trades Today:</strong> <span style="font-size: 24px; font-weight: bold; color: #2d3748;">${data.trades_count}</span></div>
                         <div><strong style="color: #718096;">Consecutive Losses:</strong> <span style="font-size: 24px; font-weight: bold; color: ${data.consecutive_losses >= 2 ? '#f56565' : '#2d3748'};">${data.consecutive_losses}</span></div>
                         <div><strong style="color: #718096;">Total P/L:</strong> <span style="font-size: 24px; font-weight: bold;" class="${data.total_profit_loss >= 0 ? 'win' : 'loss'}">${data.total_profit_loss.toFixed(2)}</span></div>
-                        <div><strong style="color: #718096;">Can Trade:</strong> <span style="font-size: 24px; font-weight: bold; color: ${data.can_trade ? '#48bb78' : '#f56565'};">${data.can_trade ? 'YES' : 'NO'}</span></div>
                     </div>
                 `;
                 document.getElementById('sessionStatus').innerHTML = sessionHtml;
