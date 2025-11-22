@@ -1425,203 +1425,334 @@ def get_optimal_config():
 
 @app.route('/dashboard', methods=['GET'])
 def dashboard():
-    return """<!DOCTYPE html>
+    html = """<!DOCTYPE html>
 <html>
 <head>
     <title>Trading Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial; padding: 20px; background: #f0f0f0; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        h1 { background: white; padding: 20px; border-radius: 5px; }
-        .controls { background: white; padding: 15px; margin: 20px 0; border-radius: 5px; }
-        button { padding: 10px 20px; margin-right: 10px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
-        button:hover { background: #0056b3; }
-        .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 15px; margin: 20px 0; }
-        .card { background: white; padding: 20px; border-radius: 5px; text-align: center; }
-        .card-label { font-size: 12px; color: #666; text-transform: uppercase; }
-        .card-value { font-size: 28px; font-weight: bold; margin-top: 10px; }
-        .green { color: #28a745; }
-        .red { color: #dc3545; }
-        table { width: 100%; background: white; border-collapse: collapse; }
-        th { background: #333; color: white; padding: 15px; text-align: left; }
-        td { padding: 15px; border-bottom: 1px solid #ddd; }
-        .badge { padding: 5px 10px; border-radius: 3px; font-size: 11px; font-weight: bold; }
-        .badge-success { background: #d4edda; color: #155724; }
-        .badge-danger { background: #f8d7da; color: #721c24; }
-        .badge-info { background: #d1ecf1; color: #0c5460; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; min-height: 100vh; padding: 20px; }
+        .container { max-width: 1600px; margin: 0 auto; }
+        .header { background: white; padding: 30px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
+        .header h1 { color: #2d3748; font-size: 32px; margin-bottom: 10px; }
+        .header p { color: #718096; font-size: 16px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .stat-card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s; border-left: 4px solid #667eea; }
+        .stat-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.2); }
+        .stat-label { font-size: 12px; color: #718096; margin-bottom: 8px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; }
+        .stat-value { font-size: 28px; font-weight: bold; color: #2d3748; }
+        .stat-value.positive { color: #48bb78; }
+        .stat-value.negative { color: #f56565; }
+        .stat-value.neutral { color: #4299e1; }
+        .session-card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .session-status { display: inline-block; padding: 8px 20px; border-radius: 20px; font-weight: 600; font-size: 14px; }
+        .session-active { background: #48bb78; color: white; }
+        .session-stopped { background: #f56565; color: white; }
+        .controls { background: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+        .btn { padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s; }
+        .btn-primary { background: #667eea; color: white; }
+        .btn-primary:hover { background: #5a67d8; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }
+        .btn-success { background: #48bb78; color: white; }
+        .btn-success:hover { background: #38a169; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(72, 187, 120, 0.4); }
+        .btn-info { background: #4299e1; color: white; }
+        .btn-info:hover { background: #3182ce; transform: translateY(-2px); }
+        .select { padding: 12px; border-radius: 8px; border: 2px solid #e2e8f0; font-size: 14px; cursor: pointer; background: white; }
+        .trades-table { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); overflow-x: auto; }
+        .trades-table h2 { color: #2d3748; margin-bottom: 20px; font-size: 24px; }
+        table { width: 100%; border-collapse: collapse; min-width: 1200px; }
+        th { background: #4a5568; color: white; padding: 14px; text-align: left; font-weight: 600; font-size: 12px; text-transform: uppercase; position: sticky; top: 0; }
+        td { padding: 12px 14px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
+        tr:hover { background: #f7fafc; }
+        .win { color: #48bb78; font-weight: 700; }
+        .loss { color: #f56565; font-weight: 700; }
+        .running { color: #4299e1; font-weight: 700; }
+        .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .badge-success { background: #c6f6d5; color: #22543d; }
+        .badge-danger { background: #fed7d7; color: #742a2a; }
+        .badge-info { background: #bee3f8; color: #2c5282; }
+        .badge-warning { background: #feebc8; color: #7c2d12; }
+        .exit-reasons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; margin-bottom: 20px; }
+        .reason-badge { padding: 8px 16px; background: #edf2f7; border-radius: 8px; font-size: 12px; font-weight: 600; }
+        .no-data { text-align: center; padding: 40px; color: #718096; font-size: 16px; }
+        .metric-highlight { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: 700; }
+        .status-running { animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Trading Dashboard</h1>
+        <div class="header">
+            <h1>🚀 Trading Dashboard</h1>
+            <p>Real-time monitoring with adaptive volatility detection, smart exit strategies & comprehensive analytics</p>
+            <p id="currentDate" style="margin-top: 12px; font-size: 15px; color: #4a5568;"></p>
+        </div>
+        
+        <div class="session-card" id="sessionCard">
+            <h3 style="margin-bottom: 15px; color: #2d3748;">📊 Today's Session Status</h3>
+            <div id="sessionStatus">Loading...</div>
+        </div>
         
         <div class="controls">
-            <button onclick="refresh()">Refresh</button>
-            <button onclick="exportData()">Export CSV</button>
-            <select id="filterSelect">
-                <option value="today">Today</option>
-                <option value="all">All Time</option>
+            <button class="btn btn-primary" onclick="loadData()">🔄 Refresh Data</button>
+            <button class="btn btn-success" onclick="exportCSV()">📥 Export CSV</button>
+            <button class="btn btn-info" onclick="showOptimalConfig()">⚙️ View Config</button>
+            <button class="btn btn-info" onclick="showLogs()">📋 View Logs</button>
+            <select id="filterSelect" onchange="changeFilter()" class="select">
+                <option value="today">Today's Trades</option>
+                <option value="all">All Trades</option>
             </select>
-            <span style="float: right;">Refresh in: <b id="timer">10</b>s</span>
+            <div style="margin-left: auto; font-size: 13px; color: #4a5568;">
+                <strong>Auto-refresh:</strong> <span id="countdown">10</span>s
+            </div>
         </div>
         
-        <div class="stats" id="statsContainer">
-            <div class="card"><div class="card-label">Loading...</div></div>
+        <div class="stats-grid" id="stats">
+            <div class="stat-card"><div class="no-data">Loading stats...</div></div>
         </div>
         
-        <table>
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Status</th>
-                    <th>Growth</th>
-                    <th>Ticks</th>
-                    <th>Exit Reason</th>
-                    <th>P/L</th>
-                    <th>Result</th>
-                </tr>
-            </thead>
-            <tbody id="tradesTable">
-                <tr><td colspan="7" style="text-align: center; padding: 40px;">Loading trades...</td></tr>
-            </tbody>
-        </table>
+        <div class="trades-table">
+            <h2>📊 Complete Trade History</h2>
+            <div id="exitReasons" class="exit-reasons"></div>
+            <div style="max-height: 600px; overflow-y: auto;">
+                <table id="tradesTable">
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Timestamp</th>
+                            <th>Trade ID</th>
+                            <th>Contract</th>
+                            <th>Initial Vol</th>
+                            <th>Exit Vol</th>
+                            <th>Growth %</th>
+                            <th>Ticks</th>
+                            <th>Duration</th>
+                            <th>Exit Reason</th>
+                            <th>Max P/L</th>
+                            <th>Final P/L</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradesBody">
+                        <tr><td colspan="13" class="no-data">Loading trades...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
-    
     <script>
-        let timer = 10;
+        let currentFilter = 'today';
+        let countdownTimer = 10;
         
-        function refresh() {
-            loadStats();
-            loadTrades();
-            timer = 10;
+        function changeFilter() {
+            currentFilter = document.getElementById('filterSelect').value;
+            loadData();
         }
         
-        function loadStats() {
-            const filter = document.getElementById('filterSelect').value;
-            fetch('/trades?filter=' + filter)
-                .then(r => r.json())
-                .then(data => {
-                    console.log('Stats data:', data);
-                    const html = `
-                        <div class="card">
-                            <div class="card-label">Total</div>
-                            <div class="card-value">${data.total_trades || 0}</div>
-                        </div>
-                        <div class="card">
-                            <div class="card-label">Wins</div>
-                            <div class="card-value green">${data.wins || 0}</div>
-                        </div>
-                        <div class="card">
-                            <div class="card-label">Losses</div>
-                            <div class="card-value red">${data.losses || 0}</div>
-                        </div>
-                        <div class="card">
-                            <div class="card-label">Win Rate</div>
-                            <div class="card-value">${data.win_rate || '0%'}</div>
-                        </div>
-                        <div class="card">
-                            <div class="card-label">Total P/L</div>
-                            <div class="card-value ${data.total_profit_loss >= 0 ? 'green' : 'red'}">
-                                $${(data.total_profit_loss || 0).toFixed(2)}
-                            </div>
-                        </div>
-                    `;
-                    document.getElementById('statsContainer').innerHTML = html;
-                })
-                .catch(e => console.error('Stats error:', e));
+        async function loadSession() {
+            try {
+                const response = await fetch('/session');
+                const data = await response.json();
+                
+                const statusClass = data.stopped ? 'session-stopped' : 'session-active';
+                const statusText = data.stopped ? '🔴 STOPPED' : '🟢 ACTIVE';
+                
+                const sessionHtml = `
+                    <p style="margin-bottom: 15px;"><span class="session-status ${statusClass}">${statusText}</span></p>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                        <div><strong style="color: #718096;">Trades Today:</strong> <span style="font-size: 24px; font-weight: bold; color: #2d3748;">${data.trades_count}</span></div>
+                        <div><strong style="color: #718096;">Consecutive Losses:</strong> <span style="font-size: 24px; font-weight: bold; color: ${data.consecutive_losses >= 2 ? '#f56565' : '#2d3748'};">${data.consecutive_losses}</span></div>
+                        <div><strong style="color: #718096;">Total P/L:</strong> <span style="font-size: 24px; font-weight: bold;" class="${data.total_profit_loss >= 0 ? 'win' : 'loss'}">${data.total_profit_loss.toFixed(2)}</span></div>
+                        <div><strong style="color: #718096;">Can Trade:</strong> <span style="font-size: 24px; font-weight: bold; color: ${data.can_trade ? '#48bb78' : '#f56565'};">${data.can_trade ? 'YES' : 'NO'}</span></div>
+                    </div>
+                `;
+                document.getElementById('sessionStatus').innerHTML = sessionHtml;
+            } catch (error) {
+                console.error('Error loading session:', error);
+                document.getElementById('sessionStatus').innerHTML = '<div class="no-data">Error loading session data</div>';
+            }
         }
         
-        function loadTrades() {
-            const filter = document.getElementById('filterSelect').value;
-            fetch('/trades?filter=' + filter)
-                .then(r => r.json())
-                .then(data => {
-                    console.log('Trades data:', data);
-                    const tbody = document.getElementById('tradesTable');
+        async function loadData() {
+            try {
+                const response = await fetch(`/trades?filter=${currentFilter}`);
+                if (!response.ok) {
+                    throw new Error('Failed to fetch trades');
+                }
+                const data = await response.json();
+                
+                const dateStr = new Date(data.date).toLocaleDateString('en-US', { 
+                    weekday: 'long', 
+                    year: 'numeric', 
+                    month: 'long', 
+                    day: 'numeric' 
+                });
+                document.getElementById('currentDate').textContent = 
+                    currentFilter === 'today' ? `📅 ${dateStr}` : '📅 All Time';
+                
+                const statsHtml = `
+                    <div class="stat-card">
+                        <div class="stat-label">Total Trades</div>
+                        <div class="stat-value">${data.total_trades || 0}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Completed</div>
+                        <div class="stat-value neutral">${data.completed_trades || 0}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Wins</div>
+                        <div class="stat-value positive">${data.wins || 0}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Losses</div>
+                        <div class="stat-value negative">${data.losses || 0}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Win Rate</div>
+                        <div class="stat-value">${data.win_rate || '0%'}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total P/L</div>
+                        <div class="stat-value ${(data.total_profit_loss || 0) >= 0 ? 'positive' : 'negative'}">
+                            ${(data.total_profit_loss || 0).toFixed(2)}
+                        </div>
+                    </div>
+                `;
+                document.getElementById('stats').innerHTML = statsHtml;
+                
+                // Display exit reasons
+                if (data.exit_reasons && Object.keys(data.exit_reasons).length > 0) {
+                    const reasonsHtml = '<strong style="display: block; margin-bottom: 10px; color: #2d3748;">📈 Exit Reasons Distribution:</strong>' + 
+                        Object.entries(data.exit_reasons)
+                            .sort((a, b) => b[1] - a[1])
+                            .map(([reason, count]) => 
+                                `<div class="reason-badge">${reason.replace(/_/g, ' ')}: <span class="metric-highlight">${count}</span></div>`
+                            ).join('');
+                    document.getElementById('exitReasons').innerHTML = reasonsHtml;
+                } else {
+                    document.getElementById('exitReasons').innerHTML = '';
+                }
+                
+                if (!data.trades || Object.keys(data.trades).length === 0) {
+                    document.getElementById('tradesBody').innerHTML = 
+                        '<tr><td colspan="13" class="no-data">No trades yet. Start trading to see results here.</td></tr>';
+                    return;
+                }
+                
+                // Show ALL trades including running and pending
+                const trades = Object.entries(data.trades)
+                    .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
+                
+                const tradesHtml = trades.map(([id, trade]) => {
+                    const profit = trade.profit || 0;
+                    const status = trade.status || 'unknown';
                     
-                    if (!data.trades || Object.keys(data.trades).length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 40px; color: #999;">No trades found. Execute a trade to see it here.</td></tr>';
-                        return;
+                    let statusBadge = '';
+                    let resultClass = '';
+                    let resultText = '';
+                    let badgeClass = '';
+                    
+                    if (status === 'running') {
+                        statusBadge = '<span class="badge badge-info status-running">RUNNING</span>';
+                        resultClass = 'running';
+                        resultText = 'RUNNING';
+                        badgeClass = 'badge-info';
+                    } else if (status === 'pending') {
+                        statusBadge = '<span class="badge badge-warning">PENDING</span>';
+                        resultClass = 'neutral';
+                        resultText = 'PENDING';
+                        badgeClass = 'badge-warning';
+                    } else {
+                        statusBadge = '<span class="badge badge-success">COMPLETED</span>';
+                        resultClass = profit > 0 ? 'win' : 'loss';
+                        resultText = profit > 0 ? 'WIN' : 'LOSS';
+                        badgeClass = profit > 0 ? 'badge-success' : 'badge-danger';
                     }
                     
-                    const tradesList = Object.entries(data.trades);
-                    console.log('Total trades found:', tradesList.length);
+                    const duration = trade.duration_seconds 
+                        ? `${trade.duration_seconds.toFixed(1)}s` 
+                        : 'N/A';
                     
-                    tradesList.sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
-                    
-                    let html = '';
-                    tradesList.forEach(([id, t]) => {
-                        const profit = t.profit || 0;
-                        const status = t.status || 'unknown';
-                        
-                        let statusBadge = '';
-                        let resultBadge = '';
-                        let plClass = '';
-                        
-                        if (status === 'completed') {
-                            statusBadge = '<span class="badge badge-success">COMPLETED</span>';
-                            if (profit > 0) {
-                                resultBadge = '<span class="badge badge-success">WIN</span>';
-                                plClass = 'green';
-                            } else {
-                                resultBadge = '<span class="badge badge-danger">LOSS</span>';
-                                plClass = 'red';
-                            }
-                        } else if (status === 'running') {
-                            statusBadge = '<span class="badge badge-info">RUNNING</span>';
-                            resultBadge = '<span class="badge badge-info">ACTIVE</span>';
-                        } else {
-                            statusBadge = '<span class="badge badge-info">PENDING</span>';
-                            resultBadge = '<span class="badge badge-info">WAITING</span>';
-                        }
-                        
-                        const time = new Date(t.timestamp).toLocaleString();
-                        const growth = ((t.growth_rate || 0) * 100).toFixed(1) + '%';
-                        const ticks = (t.ticks_completed || 0) + '/' + (t.target_ticks || 0);
-                        const reason = (t.exit_reason || 'N/A').replace(/_/g, ' ');
-                        const pl = status === 'completed' ? '$' + profit.toFixed(2) : 'N/A';
-                        
-                        html += `
-                            <tr>
-                                <td>${time}</td>
-                                <td>${statusBadge}</td>
-                                <td><b>${growth}</b></td>
-                                <td>${ticks}</td>
-                                <td>${reason}</td>
-                                <td class="${plClass}"><b>${pl}</b></td>
-                                <td>${resultBadge}</td>
-                            </tr>
-                        `;
-                    });
-                    
-                    tbody.innerHTML = html;
-                })
-                .catch(e => {
-                    console.error('Trades error:', e);
-                    document.getElementById('tradesTable').innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 40px; color: red;">Error loading trades</td></tr>';
-                });
+                    return `
+                        <tr>
+                            <td>${statusBadge}</td>
+                            <td style="font-size: 11px;">${new Date(trade.timestamp).toLocaleString()}</td>
+                            <td style="font-family: monospace; font-size: 11px;">${id.substring(0, 8)}...</td>
+                            <td style="font-family: monospace; font-size: 11px;">${(trade.contract_id || 'N/A').substring(0, 10)}...</td>
+                            <td><span class="metric-highlight">${(trade.volatility || 0).toFixed(3)}</span></td>
+                            <td>${trade.volatility_at_exit ? `<span class="metric-highlight">${trade.volatility_at_exit.toFixed(3)}</span>` : 'N/A'}</td>
+                            <td><strong>${((trade.growth_rate || 0) * 100).toFixed(2)}%</strong></td>
+                            <td>${trade.ticks_completed || '0'}/${trade.target_ticks || 'N/A'}</td>
+                            <td>${duration}</td>
+                            <td><span class="badge badge-info">${(trade.exit_reason || 'N/A').replace(/_/g, ' ')}</span></td>
+                            <td class="positive">${(trade.max_profit_reached || 0).toFixed(2)}</td>
+                            <td class="${resultClass}"><strong>${status === 'completed' ? profit.toFixed(2) : 'N/A'}</strong></td>
+                            <td><span class="badge ${badgeClass}">${resultText}</span></td>
+                        </tr>
+                    `;
+                }).join('');
+                
+                document.getElementById('tradesBody').innerHTML = tradesHtml;
+            } catch (error) {
+                console.error('Error loading data:', error);
+            }
         }
         
-        function exportData() {
-            const filter = document.getElementById('filterSelect').value;
-            window.location.href = '/trades/export?filter=' + filter;
+        function exportCSV() {
+            window.location.href = `/trades/export?filter=${currentFilter}`;
         }
         
-        // Auto refresh
+        async function showOptimalConfig() {
+            try {
+                const response = await fetch('/config/optimal');
+                const data = await response.json();
+                const config = JSON.stringify(data.recommended_setup.parameters, null, 2);
+                const notes = data.recommended_setup.notes.join('\\n• ');
+                alert(`📋 Optimal Configuration\\n\\n${config}\\n\\n📝 Notes:\\n• ${notes}\\n\\nSee /config/optimal endpoint for more setups`);
+            } catch (error) {
+                console.error('Error fetching config:', error);
+                alert('Failed to fetch configuration');
+            }
+        }
+        
+        async function showLogs() {
+            try {
+                const response = await fetch('/logs?limit=50');
+                const data = await response.json();
+                if (data.logs && data.logs.length > 0) {
+                    const logText = data.logs.map(log => 
+                        `[${log.timestamp}] ${log.level} - ${log.component}: ${log.message}`
+                    ).join('\\n');
+                    alert(`📋 Recent System Logs (${data.count}):\\n\\n${logText}`);
+                } else {
+                    alert('No logs available');
+                }
+            } catch (error) {
+                console.error('Error fetching logs:', error);
+                alert('Failed to fetch logs');
+            }
+        }
+        
+        // Auto-refresh countdown
         setInterval(() => {
-            timer--;
-            document.getElementById('timer').textContent = timer;
-            if (timer <= 0) {
-                refresh();
-                timer = 10;
+            countdownTimer--;
+            document.getElementById('countdown').textContent = countdownTimer;
+            if (countdownTimer <= 0) {
+                loadSession();
+                loadData();
+                countdownTimer = 10;
             }
         }, 1000);
         
-        // Initial load
-        refresh();
+        loadSession();
+        loadData();
     </script>
 </body>
 </html>"""
+    return html, 200
 
 if __name__ == '__main__':
     logger.info("=" * 60)
