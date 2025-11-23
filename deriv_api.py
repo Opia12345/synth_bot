@@ -294,7 +294,7 @@ class DerivAccumulatorBot:
         self.fixed_target_ticks = parameters.get('target_ticks', 4)
         
         self.max_daily_trades = parameters.get('max_daily_trades', 15)
-        self.max_consecutive_losses = parameters.get('max_consecutive_losses', 3)
+        self.max_consecutive_losses = parameters.get('max_consecutive_losses', 2)
         self.daily_loss_limit_pct = parameters.get('daily_loss_limit_pct', 0.03)
         
         self.profit_target_pct = parameters.get('profit_target_pct', 0.25)
@@ -464,25 +464,33 @@ class DerivAccumulatorBot:
         self.volatility = volatility
         self.initial_volatility = volatility
         
-        # Enhanced growth rate selection with finer granularity
-        if volatility < 0.15:
+        # FIXED: Adjusted volatility thresholds to more realistic ranges for tick data
+        # Typical tick volatility is much smaller than percentage-based volatility
+        if volatility < 0.05:
             rate = 0.05  # Very low volatility
-        elif volatility < 0.3:
+            tier = "Very Low"
+        elif volatility < 0.10:
             rate = 0.04
-        elif volatility < 0.5:
+            tier = "Low"
+        elif volatility < 0.15:
             rate = 0.03
-        elif volatility < 0.7:
+            tier = "Moderate-Low"
+        elif volatility < 0.20:
             rate = 0.025
-        elif volatility < 1.0:
+            tier = "Moderate"
+        elif volatility < 0.30:
             rate = 0.02
-        elif volatility < 1.5:
+            tier = "Moderate-High"
+        elif volatility < 0.50:
             rate = 0.015
+            tier = "High"
         else:
-            rate = 0.01  # High volatility
+            rate = 0.01  # Very high volatility
+            tier = "Very High"
         
-        trade_logger.info(f"Selected growth rate: {rate*100:.2f}% for volatility: {volatility:.4f}")
+        trade_logger.info(f"VOLATILITY ANALYSIS - Tier: {tier} | Value: {volatility:.4f} | Selected growth rate: {rate*100:.2f}%")
         return rate
-    
+
     def calculate_target_ticks(self, growth_rate):
         """Dynamically calculate target ticks based on growth rate"""
         if growth_rate >= 0.045:
