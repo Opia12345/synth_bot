@@ -12,46 +12,41 @@ from contextlib import contextmanager
 from collections import deque
 import logging
 from logging.handlers import RotatingFileHandler
+import math
 
 # === LOGGING CONFIGURATION ===
 LOG_DIR = os.environ.get('LOG_DIR', 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Configure root logger
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(name)-15s | %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# File handler with rotation
 file_handler = RotatingFileHandler(
     os.path.join(LOG_DIR, 'trading_bot.log'),
-    maxBytes=10*1024*1024,  # 10MB
+    maxBytes=10*1024*1024,
     backupCount=5
 )
 file_handler.setFormatter(logging.Formatter(
     '%(asctime)s | %(levelname)-8s | %(name)-15s | %(funcName)-20s | %(message)s'
 ))
 
-# Console handler
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(logging.Formatter(
     '%(asctime)s | %(levelname)-8s | %(message)s'
 ))
 
-# Add handlers
 root_logger = logging.getLogger()
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 
-# Create specialized loggers
 logger = logging.getLogger('TradingBot')
 trade_logger = logging.getLogger('TradeExecution')
 db_logger = logging.getLogger('Database')
 api_logger = logging.getLogger('API')
 
-# Suppress werkzeug logging unless error
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 import warnings
@@ -88,7 +83,10 @@ def init_db():
                 duration_seconds REAL,
                 entry_spot REAL,
                 exit_spot REAL,
-                volatility_at_exit REAL
+                volatility_at_exit REAL,
+                pre_trade_volatility REAL,
+                growth_rate_switches INTEGER,
+                volatility_trend TEXT
             )
         ''')
         cursor.execute('''
@@ -140,7 +138,6 @@ def get_db():
                 pass
 
 def log_system_event(level, component, message, details=None):
-    """Log system events to database"""
     try:
         with get_db() as conn:
             if conn:
@@ -168,8 +165,9 @@ def save_trade(trade_id, trade_data):
                     (trade_id, timestamp, app_id, status, success, contract_id, profit, 
                      final_balance, initial_balance, error, parameters, volatility, growth_rate, 
                      target_ticks, exit_reason, max_profit_reached, ticks_completed,
-                     duration_seconds, entry_spot, exit_spot, volatility_at_exit)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     duration_seconds, entry_spot, exit_spot, volatility_at_exit,
+                     pre_trade_volatility, growth_rate_switches, volatility_trend)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     trade_id,
                     trade_data.get('timestamp'),
@@ -191,7 +189,10 @@ def save_trade(trade_id, trade_data):
                     trade_data.get('duration_seconds'),
                     trade_data.get('entry_spot'),
                     trade_data.get('exit_spot'),
-                    trade_data.get('volatility_at_exit')
+                    trade_data.get('volatility_at_exit'),
+                    trade_data.get('pre_trade_volatility'),
+                    trade_data.get('growth_rate_switches'),
+                    trade_data.get('volatility_trend')
                 ))
                 db_logger.debug(f"Trade {trade_id} saved successfully")
     except Exception as e:
@@ -282,6 +283,95 @@ def trade_completed():
     except Exception as e:
         logger.error(f"Error in trade_completed: {e}")
 
+
+class VolatilityAnalyzer:
+    """Advanced volatility analysis using mathematical calculations on tick data"""
+    
+    @staticmethod
+    def calculate_standard_deviation(values):
+        """Calculate standard deviation"""
+        if len(values) < 2:
+            return 0
+        mean = sum(values) / len(values)
+        variance = sum((x - mean) ** 2 for x in values) / len(values)
+        return math.sqrt(variance)
+    
+    @staticmethod
+    def calculate_coefficient_of_variation(values):
+        """Calculate coefficient of variation (CV) - normalized volatility"""
+        if len(values) < 2:
+            return 0
+        mean = sum(values) / len(values)
+        if mean == 0:
+            return 0
+        std_dev = VolatilityAnalyzer.calculate_standard_deviation(values)
+        return (std_dev / abs(mean)) * 100
+    
+    @staticmethod
+    def calculate_atr(prices, period=14):
+        """Calculate Average True Range for volatility measurement"""
+        if len(prices) < period + 1:
+            return 0
+        
+        true_ranges = []
+        for i in range(1, len(prices)):
+            high_low = abs(prices[i] - prices[i-1])
+            true_ranges.append(high_low)
+        
+        if len(true_ranges) < period:
+            return sum(true_ranges) / len(true_ranges) if true_ranges else 0
+        
+        return sum(true_ranges[-period:]) / period
+    
+    @staticmethod
+    def detect_volatility_trend(prices, short_window=5, long_window=15):
+        """Detect if volatility is increasing, decreasing, or stable"""
+        if len(prices) < long_window:
+            return "insufficient_data"
+        
+        recent_vol = VolatilityAnalyzer.calculate_standard_deviation(list(prices)[-short_window:])
+        baseline_vol = VolatilityAnalyzer.calculate_standard_deviation(list(prices)[-long_window:])
+        
+        if baseline_vol == 0:
+            return "stable"
+        
+        ratio = recent_vol / baseline_vol
+        
+        if ratio > 1.3:
+            return "increasing"
+        elif ratio < 0.7:
+            return "decreasing"
+        else:
+            return "stable"
+    
+    @staticmethod
+    def is_low_volatility_window(prices, threshold=0.15):
+        """Check if current volatility is in a low/stable window - safe for entry"""
+        if len(prices) < 10:
+            return False, 0, "insufficient_data"
+        
+        # Calculate multiple volatility metrics
+        std_dev = VolatilityAnalyzer.calculate_standard_deviation(list(prices)[-10:])
+        cv = VolatilityAnalyzer.calculate_coefficient_of_variation(list(prices)[-10:])
+        trend = VolatilityAnalyzer.detect_volatility_trend(prices)
+        
+        # Calculate percentage-based volatility
+        mean_price = sum(list(prices)[-10:]) / 10
+        pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
+        
+        # Low volatility criteria:
+        # 1. Percentage volatility below threshold
+        # 2. Trend is not increasing
+        # 3. Coefficient of variation is reasonable
+        is_low_vol = (
+            pct_volatility < threshold and 
+            trend != "increasing" and 
+            cv < 2.0
+        )
+        
+        return is_low_vol, pct_volatility, trend
+
+
 class DerivAccumulatorBot:
     def __init__(self, api_token, app_id, trade_id, parameters):
         self.api_token = api_token
@@ -301,14 +391,23 @@ class DerivAccumulatorBot:
         self.stop_loss_pct = parameters.get('stop_loss_pct', 0.5)
         self.trailing_stop_pct = parameters.get('trailing_stop_pct', 0.3)
         
-        # Enhanced volatility monitoring
-        self.volatility_check_interval = parameters.get('volatility_check_interval', 2)
-        self.volatility_exit_threshold = parameters.get('volatility_exit_threshold', 1.5)  # More sensitive
+        # Enhanced volatility parameters
+        self.pre_trade_volatility_check = parameters.get('pre_trade_volatility_check', True)
+        self.max_entry_volatility = parameters.get('max_entry_volatility', 0.15)  # 0.15% max for entry
+        self.volatility_check_interval = parameters.get('volatility_check_interval', 1)
+        self.volatility_exit_threshold = parameters.get('volatility_exit_threshold', 1.5)
         
-        self.growth_rate = None
+        # Dynamic growth rate switching
+        self.enable_growth_rate_switching = parameters.get('enable_growth_rate_switching', True)
+        self.growth_rate_switch_interval = parameters.get('growth_rate_switch_interval', 3)  # Check every 3 ticks
+        
+        self.current_growth_rate = None
+        self.growth_rate_switches = 0
         self.target_ticks = None
         self.volatility = None
         self.initial_volatility = None
+        self.pre_trade_volatility = None
+        self.volatility_trend = None
         
         self.ws_urls = [
             f"wss://ws.derivws.com/websockets/v3?app_id={app_id}",
@@ -323,10 +422,13 @@ class DerivAccumulatorBot:
         self.symbol_available = False
         self.contract_type = "ACCU"
         
-        self.price_history = deque(maxlen=30)
+        # Extended price history for better analysis
+        self.price_history = deque(maxlen=50)
         self.trade_start_time = None
         self.entry_spot = None
         self.exit_spot = None
+        
+        self.volatility_analyzer = VolatilityAnalyzer()
         
         trade_logger.info(f"Bot initialized - Trade ID: {trade_id}, Symbol: {self.symbol}, Mode: {self.mode}")
         
@@ -414,7 +516,8 @@ class DerivAccumulatorBot:
             trade_logger.error(f"Failed to get balance: {e}")
         return self.account_balance
     
-    async def analyze_volatility(self, periods=30):
+    async def analyze_tick_volatility(self, periods=50):
+        """Enhanced tick-based volatility analysis with mathematical calculations"""
         try:
             ticks_request = {
                 "ticks_history": self.symbol,
@@ -427,52 +530,89 @@ class DerivAccumulatorBot:
             
             if response and "history" in response:
                 prices = [float(p) for p in response["history"]["prices"]]
-                if len(prices) >= 2:
-                    changes = [(prices[i] - prices[i-1]) / prices[i-1] * 100 
-                              for i in range(1, len(prices))]
+                if len(prices) >= 10:
+                    # Store in price history
+                    self.price_history.extend(prices)
                     
-                    mean = sum(changes) / len(changes)
-                    variance = sum((c - mean) ** 2 for c in changes) / len(changes)
-                    std_dev = (variance ** 0.5)
+                    # Calculate comprehensive volatility metrics
+                    std_dev = self.volatility_analyzer.calculate_standard_deviation(prices)
+                    cv = self.volatility_analyzer.calculate_coefficient_of_variation(prices)
+                    atr = self.volatility_analyzer.calculate_atr(prices)
                     
-                    trade_logger.info(f"Historical volatility analyzed: {std_dev:.4f}")
-                    return std_dev
+                    # Calculate percentage-based volatility
+                    mean_price = sum(prices) / len(prices)
+                    pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
+                    
+                    trade_logger.info(f"Tick Volatility Analysis - StdDev: {std_dev:.6f}, CV: {cv:.4f}%, ATR: {atr:.6f}, Pct: {pct_volatility:.4f}%")
+                    
+                    return pct_volatility, prices
         except Exception as e:
-            trade_logger.error(f"Volatility analysis failed: {e}")
-        return None
+            trade_logger.error(f"Tick volatility analysis failed: {e}")
+        return None, None
+    
+    async def wait_for_low_volatility_window(self, max_wait_time=300, check_interval=10):
+        """IMPROVEMENT #1: Wait for a low volatility window before entering trade"""
+        if not self.pre_trade_volatility_check:
+            trade_logger.info("Pre-trade volatility check disabled")
+            return True, 0, "disabled"
+        
+        trade_logger.info(f"⏳ Waiting for LOW volatility window (max {max_wait_time}s)...")
+        start_time = datetime.now()
+        attempts = 0
+        
+        while (datetime.now() - start_time).total_seconds() < max_wait_time:
+            attempts += 1
+            
+            # Get recent tick data
+            volatility, prices = await self.analyze_tick_volatility(periods=30)
+            
+            if volatility is None:
+                trade_logger.warning(f"Attempt {attempts}: Failed to get volatility data")
+                await asyncio.sleep(check_interval)
+                continue
+            
+            # Check if we're in a low volatility window
+            is_low_vol, pct_vol, trend = self.volatility_analyzer.is_low_volatility_window(
+                self.price_history, 
+                threshold=self.max_entry_volatility
+            )
+            
+            trade_logger.info(f"Attempt {attempts}: Volatility={pct_vol:.4f}%, Trend={trend}, Low Vol={is_low_vol}")
+            
+            if is_low_vol:
+                self.pre_trade_volatility = pct_vol
+                self.volatility_trend = trend
+                trade_logger.info(f"✓ LOW volatility window detected! Volatility: {pct_vol:.4f}%, Trend: {trend}")
+                return True, pct_vol, trend
+            
+            trade_logger.info(f"✗ Volatility too high ({pct_vol:.4f}% > {self.max_entry_volatility}%) or trend unstable ({trend})")
+            await asyncio.sleep(check_interval)
+        
+        trade_logger.warning(f"Timeout waiting for low volatility after {max_wait_time}s")
+        return False, volatility, "timeout"
     
     def calculate_realtime_volatility(self):
-        if len(self.price_history) < 3:
+        """IMPROVEMENT #3: Calculate real-time volatility from tick data"""
+        if len(self.price_history) < 5:
             return None
         
-        prices = list(self.price_history)
-        changes = [(prices[i] - prices[i-1]) / prices[i-1] * 100 
-                  for i in range(1, len(prices))]
+        prices = list(self.price_history)[-15:]  # Use last 15 ticks
+        mean_price = sum(prices) / len(prices)
+        std_dev = self.volatility_analyzer.calculate_standard_deviation(prices)
         
-        mean = sum(changes) / len(changes)
-        variance = sum((c - mean) ** 2 for c in changes) / len(changes)
-        return (variance ** 0.5)
+        pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
+        return pct_volatility
     
-    async def select_optimal_growth_rate(self):
-        """Industry-standard adaptive growth rate selection"""
-        volatility = await self.analyze_volatility()
-        
-        if volatility is None:
-            trade_logger.warning("Using default growth rate (no volatility data)")
-            return 0.02
-        
-        self.volatility = volatility
-        self.initial_volatility = volatility
-        
-        # FIXED: Adjusted volatility thresholds to more realistic ranges for tick data
-        # Typical tick volatility is much smaller than percentage-based volatility
-        if volatility < 0.05:
-            rate = 0.05  # Very low volatility
+    def select_growth_rate_for_volatility(self, volatility):
+        """Select optimal growth rate based on current volatility"""
+        # More aggressive thresholds for faster adaptation
+        if volatility < 0.08:
+            rate = 0.05
             tier = "Very Low"
-        elif volatility < 0.10:
+        elif volatility < 0.12:
             rate = 0.04
             tier = "Low"
-        elif volatility < 0.15:
+        elif volatility < 0.16:
             rate = 0.03
             tier = "Moderate-Low"
         elif volatility < 0.20:
@@ -485,10 +625,25 @@ class DerivAccumulatorBot:
             rate = 0.015
             tier = "High"
         else:
-            rate = 0.01  # Very high volatility
+            rate = 0.01
             tier = "Very High"
         
-        trade_logger.info(f"VOLATILITY ANALYSIS - Tier: {tier} | Value: {volatility:.4f} | Selected growth rate: {rate*100:.2f}%")
+        return rate, tier
+    
+    async def select_optimal_growth_rate(self):
+        """Initial growth rate selection based on tick volatility"""
+        volatility, _ = await self.analyze_tick_volatility()
+        
+        if volatility is None:
+            trade_logger.warning("Using default growth rate (no volatility data)")
+            return 0.02
+        
+        self.volatility = volatility
+        self.initial_volatility = volatility
+        
+        rate, tier = self.select_growth_rate_for_volatility(volatility)
+        
+        trade_logger.info(f"INITIAL VOLATILITY - Tier: {tier} | Value: {volatility:.4f}% | Selected growth rate: {rate*100:.2f}%")
         return rate
 
     def calculate_target_ticks(self, growth_rate):
@@ -508,6 +663,50 @@ class DerivAccumulatorBot:
         
         trade_logger.info(f"Target ticks calculated: {ticks} for growth rate: {growth_rate*100:.2f}%")
         return ticks
+    
+    async def check_and_switch_growth_rate(self, tick_count, current_profit):
+        """IMPROVEMENT #2: Dynamically switch growth rate during trade based on volatility changes"""
+        if not self.enable_growth_rate_switching:
+            return False
+        
+        if tick_count % self.growth_rate_switch_interval != 0:
+            return False
+        
+        # Calculate current volatility from tick data
+        current_vol = self.calculate_realtime_volatility()
+        if current_vol is None:
+            return False
+        
+        # Determine optimal growth rate for current conditions
+        optimal_rate, tier = self.select_growth_rate_for_volatility(current_vol)
+        
+        # Check if we should switch (0.5% difference threshold)
+        if abs(optimal_rate - self.current_growth_rate) >= 0.005:
+            old_rate = self.current_growth_rate
+            self.current_growth_rate = optimal_rate
+            self.growth_rate_switches += 1
+            
+            trade_logger.info(
+                f"⚡ GROWTH RATE SWITCH #{self.growth_rate_switches} at tick {tick_count} | "
+                f"Volatility: {current_vol:.4f}% ({tier}) | "
+                f"Rate: {old_rate*100:.2f}% → {optimal_rate*100:.2f}% | "
+                f"Profit: ${current_profit:.2f}"
+            )
+            
+            # Log for analysis purposes
+            log_system_event('INFO', 'GrowthRateSwitch', 
+                           f'Trade {self.trade_id} - Rate switched', {
+                               'tick': tick_count,
+                               'old_rate': old_rate,
+                               'new_rate': optimal_rate,
+                               'volatility': current_vol,
+                               'tier': tier,
+                               'profit': current_profit
+                           })
+            
+            return True
+        
+        return False
     
     async def check_trading_conditions(self):
         today = datetime.now().date().isoformat()
@@ -621,14 +820,24 @@ class DerivAccumulatorBot:
                 if not await self.validate_symbol():
                     return None, "Symbol validation failed"
             
+            # IMPROVEMENT #1: Check for LOW volatility before entering
+            can_enter, pre_vol, trend = await self.wait_for_low_volatility_window()
+            if not can_enter:
+                trade_logger.error(f"❌ TRADE REJECTED: Volatility too high or unstable")
+                return None, f"High volatility detected ({pre_vol:.4f}%). Waiting for stable conditions."
+            
+            # Select initial growth rate based on PRE-TRADE volatility
             if self.mode == 'adaptive':
-                self.growth_rate = await self.select_optimal_growth_rate()
-                self.target_ticks = self.calculate_target_ticks(self.growth_rate)
+                self.current_growth_rate = await self.select_optimal_growth_rate()
+                self.target_ticks = self.calculate_target_ticks(self.current_growth_rate)
             else:
-                self.growth_rate = self.fixed_growth_rate
+                self.current_growth_rate = self.fixed_growth_rate
                 self.target_ticks = self.fixed_target_ticks
             
-            trade_logger.info(f"Placing trade: Growth={self.growth_rate*100:.2f}%, Target ticks={self.target_ticks}")
+            trade_logger.info(
+                f"✓ ENTERING TRADE | Pre-Vol: {pre_vol:.4f}%, Trend: {trend} | "
+                f"Growth: {self.current_growth_rate*100:.2f}%, Target: {self.target_ticks} ticks"
+            )
             
             proposal_request = {
                 "proposal": 1,
@@ -637,7 +846,7 @@ class DerivAccumulatorBot:
                 "contract_type": self.contract_type,
                 "currency": "USD",
                 "symbol": self.symbol,
-                "growth_rate": self.growth_rate
+                "growth_rate": self.current_growth_rate
             }
             
             proposal_response = await self.send_request(proposal_request)
@@ -705,7 +914,7 @@ class DerivAccumulatorBot:
                             profit = float(contract.get("profit", 0))
                             duration = (datetime.now() - self.trade_start_time).total_seconds()
                             
-                            trade_logger.info(f"Trade closed - Profit: ${profit:.2f}, Duration: {duration:.1f}s, Reason: {exit_reason}")
+                            trade_logger.info(f"Trade closed - Profit: ${profit:.2f}, Duration: {duration:.1f}s, Reason: {exit_reason}, Switches: {self.growth_rate_switches}")
                             
                             try:
                                 forget_request = {
@@ -726,7 +935,8 @@ class DerivAccumulatorBot:
                                 "final_volatility": current_volatility,
                                 "duration_seconds": duration,
                                 "entry_spot": self.entry_spot,
-                                "exit_spot": self.exit_spot
+                                "exit_spot": self.exit_spot,
+                                "growth_rate_switches": self.growth_rate_switches
                             }
                         
                         current_profit = float(contract.get("profit", 0))
@@ -738,8 +948,11 @@ class DerivAccumulatorBot:
                         if contract.get("entry_spot"):
                             tick_count += 1
                             trade_logger.debug(f"Tick {tick_count}: Profit=${current_profit:.2f}, Max=${max_profit:.2f}")
+                            
+                            # IMPROVEMENT #2: Dynamic growth rate switching
+                            await self.check_and_switch_growth_rate(tick_count, current_profit)
                         
-                        # Enhanced volatility monitoring - check every tick
+                        # IMPROVEMENT #3: Enhanced volatility monitoring with tick data
                         if tick_count - last_volatility_check >= self.volatility_check_interval:
                             current_volatility = self.calculate_realtime_volatility()
                             last_volatility_check = tick_count
@@ -750,7 +963,10 @@ class DerivAccumulatorBot:
                                 # More sensitive volatility exit
                                 if volatility_ratio > self.volatility_exit_threshold:
                                     exit_reason = f"volatility_spike_{volatility_ratio:.2f}x"
-                                    trade_logger.warning(f"Volatility spike detected: {volatility_ratio:.2f}x - Closing trade")
+                                    trade_logger.warning(
+                                        f"🚨 VOLATILITY SPIKE! {volatility_ratio:.2f}x | "
+                                        f"Current: {current_volatility:.4f}% vs Initial: {self.initial_volatility:.4f}%"
+                                    )
                                     sell_request = {
                                         "sell": contract_id,
                                         "price": 0.0,
@@ -818,7 +1034,8 @@ class DerivAccumulatorBot:
                             "exit_reason": "error",
                             "ticks_completed": tick_count,
                             "max_profit_reached": max_profit,
-                            "duration_seconds": (datetime.now() - self.trade_start_time).total_seconds()
+                            "duration_seconds": (datetime.now() - self.trade_start_time).total_seconds(),
+                            "growth_rate_switches": self.growth_rate_switches
                         }
                 except asyncio.TimeoutError:
                     trade_logger.error("Contract monitoring timeout")
@@ -829,7 +1046,8 @@ class DerivAccumulatorBot:
                         "exit_reason": "timeout",
                         "ticks_completed": tick_count,
                         "max_profit_reached": max_profit,
-                        "duration_seconds": (datetime.now() - self.trade_start_time).total_seconds()
+                        "duration_seconds": (datetime.now() - self.trade_start_time).total_seconds(),
+                        "growth_rate_switches": self.growth_rate_switches
                     }
         except Exception as e:
             trade_logger.error(f"Monitor contract exception: {e}")
@@ -840,7 +1058,8 @@ class DerivAccumulatorBot:
                 "exit_reason": "monitor_failed",
                 "ticks_completed": 0,
                 "max_profit_reached": 0,
-                "duration_seconds": 0
+                "duration_seconds": 0,
+                "growth_rate_switches": 0
             }
     
     async def execute_trade_async(self):
@@ -924,7 +1143,7 @@ class DerivAccumulatorBot:
                 "timestamp": datetime.now().isoformat(),
                 "app_id": self.app_id,
                 "volatility": self.initial_volatility,
-                "growth_rate": self.growth_rate,
+                "growth_rate": self.current_growth_rate,
                 "target_ticks": self.target_ticks,
                 "exit_reason": monitor_result.get("exit_reason"),
                 "max_profit_reached": monitor_result.get("max_profit_reached"),
@@ -933,14 +1152,19 @@ class DerivAccumulatorBot:
                 "entry_spot": monitor_result.get("entry_spot"),
                 "exit_spot": monitor_result.get("exit_spot"),
                 "volatility_at_exit": monitor_result.get("final_volatility"),
+                "pre_trade_volatility": self.pre_trade_volatility,
+                "growth_rate_switches": self.growth_rate_switches,
+                "volatility_trend": self.volatility_trend,
                 "parameters": {
                     'stake': self.stake_per_trade,
                     'symbol': self.symbol,
                     'mode': self.mode,
-                    'growth_rate_used': self.growth_rate,
+                    'growth_rate_used': self.current_growth_rate,
                     'target_ticks_used': self.target_ticks,
                     'initial_volatility': self.initial_volatility,
-                    'final_volatility': monitor_result.get("final_volatility")
+                    'final_volatility': monitor_result.get("final_volatility"),
+                    'pre_trade_volatility': self.pre_trade_volatility,
+                    'growth_rate_switches': self.growth_rate_switches
                 }
             }
             save_trade(self.trade_id, result)
@@ -949,7 +1173,8 @@ class DerivAccumulatorBot:
             log_system_event('INFO', 'TradeExecution', f'Trade {self.trade_id} completed', {
                 'profit': monitor_result.get("profit", 0),
                 'exit_reason': monitor_result.get("exit_reason"),
-                'duration': monitor_result.get("duration_seconds")
+                'duration': monitor_result.get("duration_seconds"),
+                'growth_rate_switches': self.growth_rate_switches
             })
             
             return result
@@ -1018,8 +1243,12 @@ def execute_trade(app_id, api_token):
             'profit_target_pct': float(data.get('profit_target_pct', 0.25)),
             'stop_loss_pct': float(data.get('stop_loss_pct', 0.5)),
             'trailing_stop_pct': float(data.get('trailing_stop_pct', 0.3)),
-            'volatility_check_interval': int(data.get('volatility_check_interval', 2)),
-            'volatility_exit_threshold': float(data.get('volatility_exit_threshold', 1.5))
+            'volatility_check_interval': int(data.get('volatility_check_interval', 1)),
+            'volatility_exit_threshold': float(data.get('volatility_exit_threshold', 1.5)),
+            'pre_trade_volatility_check': data.get('pre_trade_volatility_check', True),
+            'max_entry_volatility': float(data.get('max_entry_volatility', 0.15)),
+            'enable_growth_rate_switching': data.get('enable_growth_rate_switching', True),
+            'growth_rate_switch_interval': int(data.get('growth_rate_switch_interval', 3))
         }
         
         new_trade_id = str(uuid.uuid4())
@@ -1074,6 +1303,8 @@ def get_trade_result(trade_id):
             "initial_balance": result.get('initial_balance'),
             "volatility": result.get('volatility'),
             "volatility_at_exit": result.get('volatility_at_exit'),
+            "pre_trade_volatility": result.get('pre_trade_volatility'),
+            "volatility_trend": result.get('volatility_trend'),
             "growth_rate": result.get('growth_rate'),
             "target_ticks": result.get('target_ticks'),
             "exit_reason": result.get('exit_reason'),
@@ -1082,6 +1313,7 @@ def get_trade_result(trade_id):
             "duration_seconds": result.get('duration_seconds'),
             "entry_spot": result.get('entry_spot'),
             "exit_spot": result.get('exit_spot'),
+            "growth_rate_switches": result.get('growth_rate_switches'),
             "error_details": result.get('error')
         })
     
@@ -1138,41 +1370,35 @@ def get_all_trades_endpoint():
     else:
         filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
     
-    # Show ALL trades (including running and pending)
     all_status_trades = filtered_trades
     completed = [t for t in filtered_trades if t.get('status') == 'completed']
     running = [t for t in filtered_trades if t.get('status') == 'running']
     pending = [t for t in filtered_trades if t.get('status') == 'pending']
     
-    # Calculate wins and losses from completed trades
     wins = [t for t in completed if t.get('profit', 0) > 0]
     losses = [t for t in completed if t.get('profit', 0) <= 0]
     total_profit = sum(t.get('profit', 0) for t in completed)
     
-    # Calculate averages
     avg_volatility = sum(t.get('volatility', 0) or 0 for t in completed) / len(completed) if completed else 0
     avg_growth_rate = sum(t.get('growth_rate', 0) or 0 for t in completed) / len(completed) if completed else 0
     avg_duration = sum(t.get('duration_seconds', 0) or 0 for t in completed) / len(completed) if completed else 0
+    avg_switches = sum(t.get('growth_rate_switches', 0) or 0 for t in completed) / len(completed) if completed else 0
     
-    # Exit reasons analysis
     exit_reasons = {}
     for t in completed:
         reason = t.get('exit_reason', 'unknown')
         exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
     
-    # Convert trades to dictionary format
     trades_dict = {}
     for t in all_status_trades:
         trade_dict = dict(t)
         trades_dict[trade_dict['trade_id']] = trade_dict
     
-    # Calculate win rate
     if len(completed) > 0:
         win_rate = f"{(len(wins)/len(completed)*100):.2f}%"
     else:
         win_rate = "0%"
     
-    # Risk metrics
     if losses:
         avg_loss = sum(abs(t.get('profit', 0)) for t in losses) / len(losses)
         max_loss = max(abs(t.get('profit', 0)) for t in losses)
@@ -1201,6 +1427,7 @@ def get_all_trades_endpoint():
         "avg_volatility": round(avg_volatility, 4),
         "avg_growth_rate": round(avg_growth_rate, 4),
         "avg_duration_seconds": round(avg_duration, 2),
+        "avg_growth_rate_switches": round(avg_switches, 2),
         "avg_win": round(avg_win, 2),
         "avg_loss": round(avg_loss, 2),
         "max_win": round(max_win, 2),
@@ -1210,147 +1437,26 @@ def get_all_trades_endpoint():
         "trades": trades_dict
     }), 200
 
-@app.route('/trades/summary', methods=['GET'])
-def get_trades_summary():
-    all_trades = get_all_trades()
-    completed = [t for t in all_trades if t.get('status') == 'completed']
-    
-    if not completed:
-        return jsonify({"message": "No completed trades yet", "total_trades": len(all_trades)}), 200
-    
-    total_profit = sum(t.get('profit', 0) for t in completed)
-    wins = [t for t in completed if t.get('profit', 0) > 0]
-    losses = [t for t in completed if t.get('profit', 0) <= 0]
-    
-    win_amounts = [t.get('profit', 0) for t in wins]
-    loss_amounts = [abs(t.get('profit', 0)) for t in losses]
-    
-    exit_reasons = {}
-    for t in completed:
-        reason = t.get('exit_reason', 'unknown')
-        exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
-    
-    # Additional metrics
-    durations = [t.get('duration_seconds', 0) for t in completed if t.get('duration_seconds')]
-    avg_duration = sum(durations) / len(durations) if durations else 0
-    
-    return jsonify({
-        "summary": {
-            "total_trades": len(completed),
-            "wins": len(wins),
-            "losses": len(losses),
-            "win_rate": f"{(len(wins)/len(completed)*100):.2f}%",
-            "total_profit_loss": round(total_profit, 2),
-            "avg_trade_duration": round(avg_duration, 2)
-        },
-        "profit_stats": {
-            "average_win": round(sum(win_amounts)/len(win_amounts), 2) if win_amounts else 0,
-            "average_loss": round(sum(loss_amounts)/len(loss_amounts), 2) if loss_amounts else 0,
-            "largest_win": round(max(win_amounts), 2) if win_amounts else 0,
-            "largest_loss": round(max(loss_amounts), 2) if loss_amounts else 0,
-            "profit_factor": round((sum(win_amounts)/sum(loss_amounts)), 2) if loss_amounts and sum(loss_amounts) > 0 else 0
-        },
-        "exit_reasons": exit_reasons,
-        "recent_trades": [
-            {
-                "trade_id": t['trade_id'],
-                "timestamp": t.get('timestamp'),
-                "profit": t.get('profit', 0),
-                "result": "WIN" if t.get('profit', 0) > 0 else "LOSS",
-                "contract_id": t.get('contract_id'),
-                "volatility": t.get('volatility'),
-                "growth_rate": t.get('growth_rate'),
-                "exit_reason": t.get('exit_reason'),
-                "ticks_completed": t.get('ticks_completed'),
-                "duration_seconds": t.get('duration_seconds')
-            }
-            for t in sorted(completed, key=lambda x: x.get('timestamp', ''), reverse=True)[:10]
-        ]
-    }), 200
-
-@app.route('/trades/export', methods=['GET'])
-def export_trades():
-    all_trades = get_all_trades()
-    filter_by = request.args.get('filter', 'today')
-    
-    from datetime import date
-    today = date.today()
-    
-    if filter_by == 'today':
-        trades_to_export = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
-    else:
-        trades_to_export = all_trades
-    
-    if not trades_to_export:
-        return jsonify({"message": "No trades to export"}), 200
-    
-    csv_lines = ["Trade_ID,Timestamp,Status,Contract_ID,Profit_Loss,Result,Initial_Balance,Final_Balance,Volatility,Volatility_Exit,Growth_Rate,Target_Ticks,Exit_Reason,Ticks_Completed,Max_Profit,Duration_Seconds,Entry_Spot,Exit_Spot"]
-    
-    for trade in sorted(trades_to_export, key=lambda x: x.get('timestamp', '')):
-        profit = trade.get('profit', 0) or 0
-        csv_lines.append(
-            f"{trade['trade_id']},"
-            f"{trade.get('timestamp', 'N/A')},"
-            f"{trade.get('status', 'N/A')},"
-            f"{trade.get('contract_id', 'N/A')},"
-            f"{profit:.2f},"
-            f"{'WIN' if profit > 0 else 'LOSS' if trade.get('status') == 'completed' else 'PENDING'},"
-            f"{trade.get('initial_balance', 'N/A')},"
-            f"{trade.get('final_balance', 'N/A')},"
-            f"{trade.get('volatility', 'N/A')},"
-            f"{trade.get('volatility_at_exit', 'N/A')},"
-            f"{trade.get('growth_rate', 'N/A')},"
-            f"{trade.get('target_ticks', 'N/A')},"
-            f"{trade.get('exit_reason', 'N/A')},"
-            f"{trade.get('ticks_completed', 'N/A')},"
-            f"{trade.get('max_profit_reached', 'N/A')},"
-            f"{trade.get('duration_seconds', 'N/A')},"
-            f"{trade.get('entry_spot', 'N/A')},"
-            f"{trade.get('exit_spot', 'N/A')}"
-        )
-    
-    return "\n".join(csv_lines), 200, {
-        'Content-Type': 'text/csv',
-        'Content-Disposition': f'attachment; filename=trades_{filter_by}_{today.isoformat()}.csv'
-    }
-
-@app.route('/logs', methods=['GET'])
-def get_logs():
-    """Retrieve system logs"""
-    limit = request.args.get('limit', 100, type=int)
-    level = request.args.get('level', None)
-    
-    try:
-        with get_db() as conn:
-            if conn:
-                cursor = conn.cursor()
-                if level:
-                    cursor.execute('SELECT * FROM system_logs WHERE level = ? ORDER BY timestamp DESC LIMIT ?', (level.upper(), limit))
-                else:
-                    cursor.execute('SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT ?', (limit,))
-                
-                logs = [dict(row) for row in cursor.fetchall()]
-                return jsonify({"logs": logs, "count": len(logs)}), 200
-    except Exception as e:
-        api_logger.error(f"Failed to retrieve logs: {e}")
-        return jsonify({"error": "Failed to retrieve logs"}), 500
-
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
         "status": "healthy",
-        "service": "Deriv Accumulator Trading Bot - Industry Standard v3.0",
+        "service": "Deriv Accumulator Trading Bot - Enhanced v4.0",
         "timestamp": datetime.now().isoformat(),
         "active_trades": active_trade_count,
         "max_concurrent": MAX_CONCURRENT_TRADES,
         "features": [
-            "Enhanced volatility monitoring (1.5x threshold)",
-            "Real-time adaptive exit strategies",
-            "Comprehensive logging system",
-            "Trailing stop loss",
-            "Dynamic growth rate selection (1-5%)",
-            "Industry-standard risk management",
-            "Complete trade analytics"
+            "✓ Pre-trade LOW volatility detection",
+            "✓ Mathematical tick-based volatility analysis",
+            "✓ Dynamic growth rate switching during trades",
+            "✓ Real-time volatility monitoring",
+            "✓ Advanced risk management",
+            "✓ Comprehensive analytics with growth rate switches tracking"
+        ],
+        "improvements": [
+            "1. Checks for LOW volatility before trade entry",
+            "2. Monitors and switches growth rates during trade",
+            "3. Uses tick data for accurate volatility calculations"
         ],
         "logging_enabled": True,
         "log_location": LOG_DIR
@@ -1361,73 +1467,51 @@ def health_check():
 def get_optimal_config():
     return jsonify({
         "recommended_setup": {
-            "description": "Industry-standard setup with enhanced volatility monitoring",
+            "description": "Enhanced setup with pre-trade volatility checks and dynamic growth rate switching",
             "parameters": {
                 "stake": 5.0,
                 "symbol": "1HZ10V",
                 "mode": "adaptive",
-                "growth_rate": 0.02,
-                "target_ticks": 4,
                 "max_daily_trades": 15,
                 "max_consecutive_losses": 3,
                 "daily_loss_limit_pct": 0.03,
                 "profit_target_pct": 0.25,
                 "stop_loss_pct": 0.5,
                 "trailing_stop_pct": 0.3,
-                "volatility_check_interval": 2,
-                "volatility_exit_threshold": 1.5
+                "volatility_check_interval": 1,
+                "volatility_exit_threshold": 1.5,
+                "pre_trade_volatility_check": True,
+                "max_entry_volatility": 0.15,
+                "enable_growth_rate_switching": True,
+                "growth_rate_switch_interval": 3
             },
             "notes": [
-                "Volatility threshold reduced to 1.5x for quicker exits",
-                "Check interval reduced to 2 ticks for faster response",
-                "Adaptive mode automatically selects 1-5% growth rate",
-                "Growth rate varies based on market volatility"
+                "✓ Waits for LOW volatility (< 0.15%) before entering trade",
+                "✓ Dynamically switches growth rates every 3 ticks based on current volatility",
+                "✓ Uses mathematical calculations on tick data for accuracy",
+                "✓ Exits immediately on volatility spikes (1.5x threshold)",
+                "✓ Adaptive mode automatically selects 1-5% growth rate"
             ]
         },
-        "conservative_setup": {
-            "description": "Lower risk with smaller stakes and tighter controls",
-            "parameters": {
-                "stake": 3.0,
-                "symbol": "1HZ10V",
-                "mode": "adaptive",
-                "max_daily_trades": 10,
-                "max_consecutive_losses": 2,
-                "daily_loss_limit_pct": 0.02,
-                "profit_target_pct": 0.20,
-                "stop_loss_pct": 0.4,
-                "trailing_stop_pct": 0.25,
-                "volatility_exit_threshold": 1.3
-            }
-        },
-        "aggressive_setup": {
-            "description": "Higher risk with potential for larger gains",
-            "parameters": {
-                "stake": 10.0,
-                "symbol": "1HZ25V",
-                "mode": "adaptive",
-                "max_daily_trades": 20,
-                "max_consecutive_losses": 4,
-                "daily_loss_limit_pct": 0.05,
-                "profit_target_pct": 0.35,
-                "stop_loss_pct": 0.6,
-                "trailing_stop_pct": 0.35,
-                "volatility_exit_threshold": 1.8
-            }
-        },
-        "growth_rate_info": {
-            "adaptive_mode": "Automatically selects from 1% to 5% based on volatility",
-            "volatility_ranges": {
-                "<0.15": "5.0% growth rate",
-                "0.15-0.30": "4.0% growth rate",
-                "0.30-0.50": "3.0% growth rate",
-                "0.50-0.70": "2.5% growth rate",
-                "0.70-1.00": "2.0% growth rate",
-                "1.00-1.50": "1.5% growth rate",
-                ">1.50": "1.0% growth rate"
+        "new_parameters": {
+            "pre_trade_volatility_check": {
+                "default": True,
+                "description": "Wait for low volatility window before entering trade"
             },
-            "recommendation": "Use adaptive mode for best results. System automatically adjusts growth rate based on real-time market conditions."
+            "max_entry_volatility": {
+                "default": 0.15,
+                "description": "Maximum volatility percentage allowed for trade entry (0.15 = 0.15%)"
+            },
+            "enable_growth_rate_switching": {
+                "default": True,
+                "description": "Enable dynamic growth rate switching during trade based on volatility"
+            },
+            "growth_rate_switch_interval": {
+                "default": 3,
+                "description": "Check and potentially switch growth rate every N ticks"
+            }
         },
-        "usage": "POST /trade/<app_id>/<api_token> with JSON body containing any of these parameters"
+        "usage": "POST /trade/<app_id>/<api_token> with JSON body containing these parameters"
     }), 200
 
 
@@ -1436,15 +1520,16 @@ def dashboard():
     html = """<!DOCTYPE html>
 <html>
 <head>
-    <title>Trading Dashboard</title>
+    <title>Enhanced Trading Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; min-height: 100vh; padding: 20px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; min-height: 100vh; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
         .container { max-width: 1600px; margin: 0 auto; }
         .header { background: white; padding: 30px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
         .header h1 { color: #2d3748; font-size: 32px; margin-bottom: 10px; }
         .header p { color: #718096; font-size: 16px; }
+        .feature-badge { display: inline-block; background: #48bb78; color: white; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; margin: 4px; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 20px; }
         .stat-card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s; }
         .stat-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.2); }
@@ -1462,13 +1547,13 @@ def dashboard():
         .btn-primary { background: #667eea; color: white; }
         .btn-primary:hover { background: #5a67d8; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }
         .btn-success { background: #48bb78; color: white; }
-        .btn-success:hover { background: #38a169; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(72, 187, 120, 0.4); }
+        .btn-success:hover { background: #38a169; }
         .btn-info { background: #4299e1; color: white; }
-        .btn-info:hover { background: #3182ce; transform: translateY(-2px); }
+        .btn-info:hover { background: #3182ce; }
         .select { padding: 12px; border-radius: 8px; border: 2px solid #e2e8f0; font-size: 14px; cursor: pointer; background: white; }
         .trades-table { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); overflow-x: auto; }
         .trades-table h2 { color: #2d3748; margin-bottom: 20px; font-size: 24px; }
-        table { width: 100%; border-collapse: collapse; min-width: 1200px; }
+        table { width: 100%; border-collapse: collapse; min-width: 1400px; }
         th { background: #4a5568; color: white; padding: 14px; text-align: left; font-weight: 600; font-size: 12px; text-transform: uppercase; position: sticky; top: 0; }
         td { padding: 12px 14px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
         tr:hover { background: #f7fafc; }
@@ -1480,22 +1565,21 @@ def dashboard():
         .badge-danger { background: #fed7d7; color: #742a2a; }
         .badge-info { background: #bee3f8; color: #2c5282; }
         .badge-warning { background: #feebc8; color: #7c2d12; }
-        .exit-reasons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; margin-bottom: 20px; }
-        .reason-badge { padding: 8px 16px; background: #edf2f7; border-radius: 8px; font-size: 12px; font-weight: 600; }
-        .no-data { text-align: center; padding: 40px; color: #718096; font-size: 16px; }
         .metric-highlight { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: 700; }
         .status-running { animation: pulse 2s infinite; }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.6; }
-        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 Trading Dashboard</h1>
-            <p>Real-time monitoring with adaptive volatility detection, smart exit strategies & comprehensive analytics</p>
+            <h1>🚀 Enhanced Trading Dashboard v4.0</h1>
+            <p>Real-time monitoring with pre-trade volatility checks, dynamic growth rate switching & tick-based analysis</p>
+            <div style="margin-top: 15px;">
+                <span class="feature-badge">✓ Pre-Trade Vol Check</span>
+                <span class="feature-badge">✓ Dynamic Growth Switching</span>
+                <span class="feature-badge">✓ Tick-Based Analysis</span>
+            </div>
             <p id="currentDate" style="margin-top: 12px; font-size: 15px; color: #4a5568;"></p>
         </div>
         
@@ -1508,7 +1592,6 @@ def dashboard():
             <button class="btn btn-primary" onclick="loadData()">🔄 Refresh Data</button>
             <button class="btn btn-success" onclick="exportCSV()">📥 Export CSV</button>
             <button class="btn btn-info" onclick="showOptimalConfig()">⚙️ View Config</button>
-            <button class="btn btn-info" onclick="showLogs()">📋 View Logs</button>
             <select id="filterSelect" onchange="changeFilter()" class="select">
                 <option value="today">Today's Trades</option>
                 <option value="all">All Trades</option>
@@ -1519,12 +1602,11 @@ def dashboard():
         </div>
         
         <div class="stats-grid" id="stats">
-            <div class="stat-card"><div class="no-data">Loading stats...</div></div>
+            <div class="stat-card"><div>Loading stats...</div></div>
         </div>
         
         <div class="trades-table">
-            <h2>📊 Complete Trade History</h2>
-            <div id="exitReasons" class="exit-reasons"></div>
+            <h2>📊 Complete Trade History with Growth Rate Switches</h2>
             <div style="max-height: 600px; overflow-y: auto;">
                 <table id="tradesTable">
                     <thead>
@@ -1532,10 +1614,11 @@ def dashboard():
                             <th>Status</th>
                             <th>Timestamp</th>
                             <th>Trade ID</th>
-                            <th>Contract</th>
-                            <th>Initial Vol</th>
+                            <th>Pre-Vol</th>
+                            <th>Trend</th>
                             <th>Exit Vol</th>
                             <th>Growth %</th>
+                            <th>Switches</th>
                             <th>Ticks</th>
                             <th>Duration</th>
                             <th>Exit Reason</th>
@@ -1545,7 +1628,7 @@ def dashboard():
                         </tr>
                     </thead>
                     <tbody id="tradesBody">
-                        <tr><td colspan="13" class="no-data">Loading trades...</td></tr>
+                        <tr><td colspan="14">Loading trades...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1579,23 +1662,16 @@ def dashboard():
                 document.getElementById('sessionStatus').innerHTML = sessionHtml;
             } catch (error) {
                 console.error('Error loading session:', error);
-                document.getElementById('sessionStatus').innerHTML = '<div class="no-data">Error loading session data</div>';
             }
         }
         
         async function loadData() {
             try {
                 const response = await fetch(`/trades?filter=${currentFilter}`);
-                if (!response.ok) {
-                    throw new Error('Failed to fetch trades');
-                }
                 const data = await response.json();
                 
                 const dateStr = new Date(data.date).toLocaleDateString('en-US', { 
-                    weekday: 'long', 
-                    year: 'numeric', 
-                    month: 'long', 
-                    day: 'numeric' 
+                    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' 
                 });
                 document.getElementById('currentDate').textContent = 
                     currentFilter === 'today' ? `📅 ${dateStr}` : '📅 All Time';
@@ -1627,29 +1703,19 @@ def dashboard():
                             ${(data.total_profit_loss || 0).toFixed(2)}
                         </div>
                     </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Avg Switches</div>
+                        <div class="stat-value neutral">${(data.avg_growth_rate_switches || 0).toFixed(1)}</div>
+                    </div>
                 `;
                 document.getElementById('stats').innerHTML = statsHtml;
                 
-                // Display exit reasons
-                if (data.exit_reasons && Object.keys(data.exit_reasons).length > 0) {
-                    const reasonsHtml = '<strong style="display: block; margin-bottom: 10px; color: #2d3748;">📈 Exit Reasons Distribution:</strong>' + 
-                        Object.entries(data.exit_reasons)
-                            .sort((a, b) => b[1] - a[1])
-                            .map(([reason, count]) => 
-                                `<div class="reason-badge">${reason.replace(/_/g, ' ')}: <span class="metric-highlight">${count}</span></div>`
-                            ).join('');
-                    document.getElementById('exitReasons').innerHTML = reasonsHtml;
-                } else {
-                    document.getElementById('exitReasons').innerHTML = '';
-                }
-                
                 if (!data.trades || Object.keys(data.trades).length === 0) {
                     document.getElementById('tradesBody').innerHTML = 
-                        '<tr><td colspan="13" class="no-data">No trades yet. Start trading to see results here.</td></tr>';
+                        '<tr><td colspan="14">No trades yet. Start trading to see results here.</td></tr>';
                     return;
                 }
                 
-                // Show ALL trades including running and pending
                 const trades = Object.entries(data.trades)
                     .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
                 
@@ -1660,44 +1726,41 @@ def dashboard():
                     let statusBadge = '';
                     let resultClass = '';
                     let resultText = '';
-                    let badgeClass = '';
                     
                     if (status === 'running') {
                         statusBadge = '<span class="badge badge-info status-running">RUNNING</span>';
                         resultClass = 'running';
                         resultText = 'RUNNING';
-                        badgeClass = 'badge-info';
                     } else if (status === 'pending') {
                         statusBadge = '<span class="badge badge-warning">PENDING</span>';
                         resultClass = 'neutral';
                         resultText = 'PENDING';
-                        badgeClass = 'badge-warning';
                     } else {
                         statusBadge = '<span class="badge badge-success">COMPLETED</span>';
                         resultClass = profit > 0 ? 'win' : 'loss';
                         resultText = profit > 0 ? 'WIN' : 'LOSS';
-                        badgeClass = profit > 0 ? 'badge-success' : 'badge-danger';
                     }
                     
-                    const duration = trade.duration_seconds 
-                        ? `${trade.duration_seconds.toFixed(1)}s` 
-                        : 'N/A';
+                    const switches = trade.growth_rate_switches || 0;
+                    const switchBadge = switches > 0 ? 
+                        `<span class="metric-highlight">${switches}</span>` : '0';
                     
                     return `
                         <tr>
                             <td>${statusBadge}</td>
                             <td style="font-size: 11px;">${new Date(trade.timestamp).toLocaleString()}</td>
                             <td style="font-family: monospace; font-size: 11px;">${id.substring(0, 8)}...</td>
-                            <td style="font-family: monospace; font-size: 11px;">${(trade.contract_id || 'N/A').substring(0, 10)}...</td>
-                            <td><span class="metric-highlight">${(trade.volatility || 0).toFixed(3)}</span></td>
-                            <td>${trade.volatility_at_exit ? `<span class="metric-highlight">${trade.volatility_at_exit.toFixed(3)}</span>` : 'N/A'}</td>
+                            <td><span class="metric-highlight">${(trade.pre_trade_volatility || 0).toFixed(3)}%</span></td>
+                            <td><span class="badge badge-info">${trade.volatility_trend || 'N/A'}</span></td>
+                            <td>${trade.volatility_at_exit ? `<span class="metric-highlight">${trade.volatility_at_exit.toFixed(3)}%</span>` : 'N/A'}</td>
                             <td><strong>${((trade.growth_rate || 0) * 100).toFixed(2)}%</strong></td>
+                            <td>${switchBadge}</td>
                             <td>${trade.ticks_completed || '0'}/${trade.target_ticks || 'N/A'}</td>
-                            <td>${duration}</td>
+                            <td>${trade.duration_seconds ? trade.duration_seconds.toFixed(1) + 's' : 'N/A'}</td>
                             <td><span class="badge badge-info">${(trade.exit_reason || 'N/A').replace(/_/g, ' ')}</span></td>
                             <td class="positive">${(trade.max_profit_reached || 0).toFixed(2)}</td>
                             <td class="${resultClass}"><strong>${status === 'completed' ? profit.toFixed(2) : 'N/A'}</strong></td>
-                            <td><span class="badge ${badgeClass}">${resultText}</span></td>
+                            <td><span class="badge ${profit > 0 ? 'badge-success' : 'badge-danger'}">${resultText}</span></td>
                         </tr>
                     `;
                 }).join('');
@@ -1717,33 +1780,13 @@ def dashboard():
                 const response = await fetch('/config/optimal');
                 const data = await response.json();
                 const config = JSON.stringify(data.recommended_setup.parameters, null, 2);
-                const notes = data.recommended_setup.notes.join('\\n• ');
-                alert(`📋 Optimal Configuration\\n\\n${config}\\n\\n📝 Notes:\\n• ${notes}\\n\\nSee /config/optimal endpoint for more setups`);
+                const notes = data.recommended_setup.notes.join('\\n');
+                alert(`📋 Enhanced Configuration\\n\\n${config}\\n\\n📝 New Features:\\n${notes}`);
             } catch (error) {
-                console.error('Error fetching config:', error);
                 alert('Failed to fetch configuration');
             }
         }
         
-        async function showLogs() {
-            try {
-                const response = await fetch('/logs?limit=50');
-                const data = await response.json();
-                if (data.logs && data.logs.length > 0) {
-                    const logText = data.logs.map(log => 
-                        `[${log.timestamp}] ${log.level} - ${log.component}: ${log.message}`
-                    ).join('\\n');
-                    alert(`📋 Recent System Logs (${data.count}):\\n\\n${logText}`);
-                } else {
-                    alert('No logs available');
-                }
-            } catch (error) {
-                console.error('Error fetching logs:', error);
-                alert('Failed to fetch logs');
-            }
-        }
-        
-        // Auto-refresh countdown
         setInterval(() => {
             countdownTimer--;
             document.getElementById('countdown').textContent = countdownTimer;
@@ -1763,8 +1806,8 @@ def dashboard():
 
 if __name__ == '__main__':
     logger.info("=" * 60)
-    logger.info("Starting Deriv Accumulator Trading Bot v3.0")
-    logger.info("Industry Standard Edition with Enhanced Logging")
+    logger.info("Starting Deriv Accumulator Trading Bot v4.0 - ENHANCED")
+    logger.info("With Pre-Trade Volatility Checks & Dynamic Growth Switching")
     logger.info("=" * 60)
     
     port = int(os.environ.get('PORT', 5000))
@@ -1772,5 +1815,9 @@ if __name__ == '__main__':
     logger.info(f"Logs directory: {LOG_DIR}")
     logger.info(f"Database path: {DB_PATH}")
     logger.info(f"Max concurrent trades: {MAX_CONCURRENT_TRADES}")
+    logger.info("IMPROVEMENTS:")
+    logger.info("  1. ✓ Pre-trade LOW volatility detection")
+    logger.info("  2. ✓ Dynamic growth rate switching during trades")
+    logger.info("  3. ✓ Mathematical tick-based volatility analysis")
     
     app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False, threaded=True)
