@@ -372,6 +372,48 @@ class VolatilityAnalyzer:
         return is_low_vol, pct_volatility, trend
 
 
+class EnhancedSafetyChecks:
+    """
+    Comprehensive safety checks to prevent forced trades
+    Only enter trades when volatility is genuinely low and safe
+    """
+    
+    @staticmethod
+    def is_volatility_safe_for_growth_rate(volatility_pct, growth_rate):
+        """
+        Verify that current volatility is safe for the proposed growth rate
+        Higher growth rates require LOWER volatility
+        
+        Returns: (is_safe, reason, max_allowed_volatility)
+        """
+        # Define strict volatility thresholds for each growth rate tier
+        safety_matrix = {
+            0.05: 0.08,   # 5% growth needs < 0.08% volatility (VERY LOW)
+            0.04: 0.10,   # 4% growth needs < 0.10% volatility (LOW)
+            0.03: 0.12,   # 3% growth needs < 0.12% volatility (MODERATE-LOW)
+            0.025: 0.15,  # 2.5% growth needs < 0.15% volatility (MODERATE)
+            0.02: 0.18,   # 2% growth needs < 0.18% volatility (MODERATE-HIGH)
+            0.015: 0.25,  # 1.5% growth needs < 0.25% volatility (HIGH)
+            0.01: 0.35    # 1% growth needs < 0.35% volatility (VERY HIGH)
+        }
+        
+        # Find the appropriate threshold for this growth rate
+        max_volatility = 0.35  # Default fallback
+        for rate_threshold, vol_threshold in sorted(safety_matrix.items(), reverse=True):
+            if growth_rate >= rate_threshold:
+                max_volatility = vol_threshold
+                break
+        
+        is_safe = volatility_pct < max_volatility
+        
+        if not is_safe:
+            reason = f"Volatility {volatility_pct:.4f}% too high for {growth_rate*100:.2f}% growth rate (max: {max_volatility:.4f}%)"
+        else:
+            reason = f"Volatility {volatility_pct:.4f}% is safe for {growth_rate*100:.2f}% growth rate (max: {max_volatility:.4f}%)"
+        
+        return is_safe, reason, max_volatility
+
+
 class DerivAccumulatorBot:
     def __init__(self, api_token, app_id, trade_id, parameters):
         self.api_token = api_token
@@ -549,189 +591,149 @@ class DerivAccumulatorBot:
         except Exception as e:
             trade_logger.error(f"Tick volatility analysis failed: {e}")
         return None, None
-class EnhancedSafetyChecks:
-    """
-    Comprehensive safety checks to prevent forced trades
-    Only enter trades when volatility is genuinely low and safe
-    """
-    
-    @staticmethod
-    def is_volatility_safe_for_growth_rate(volatility_pct, growth_rate):
+
+    async def wait_for_low_volatility_window(self, max_wait_time=600, check_interval=15):
         """
-        Verify that current volatility is safe for the proposed growth rate
-        Higher growth rates require LOWER volatility
+        ENHANCED SAFETY VERSION
         
-        Returns: (is_safe, reason, max_allowed_volatility)
+        Key improvements:
+        1. NO TIMEOUT FALLBACK - If we don't find safe conditions, we DON'T trade
+        2. Checks volatility safety for MULTIPLE growth rates
+        3. Requires SUSTAINED low volatility (not just one reading)
+        4. More conservative thresholds
+        
+        Returns: (can_trade, volatility, trend, reason)
         """
-        # Define strict volatility thresholds for each growth rate tier
-        safety_matrix = {
-            0.05: 0.08,   # 5% growth needs < 0.08% volatility (VERY LOW)
-            0.04: 0.10,   # 4% growth needs < 0.10% volatility (LOW)
-            0.03: 0.12,   # 3% growth needs < 0.12% volatility (MODERATE-LOW)
-            0.025: 0.15,  # 2.5% growth needs < 0.15% volatility (MODERATE)
-            0.02: 0.18,   # 2% growth needs < 0.18% volatility (MODERATE-HIGH)
-            0.015: 0.25,  # 1.5% growth needs < 0.25% volatility (HIGH)
-            0.01: 0.35    # 1% growth needs < 0.35% volatility (VERY HIGH)
-        }
+        if not self.pre_trade_volatility_check:
+            trade_logger.info("⚠️ Pre-trade volatility check DISABLED - proceeding without checks")
+            return True, 0, "disabled", "Check disabled by configuration"
         
-        # Find the appropriate threshold for this growth rate
-        max_volatility = 0.35  # Default fallback
-        for rate_threshold, vol_threshold in sorted(safety_matrix.items(), reverse=True):
-            if growth_rate >= rate_threshold:
-                max_volatility = vol_threshold
-                break
+        trade_logger.info(f"🔍 STRICT SAFETY CHECK: Waiting for LOW volatility window (timeout: {max_wait_time}s)")
+        trade_logger.info(f"⚠️ Will NOT trade if safe conditions aren't found within {max_wait_time}s")
         
-        is_safe = volatility_pct < max_volatility
+        start_time = datetime.now()
+        attempts = 0
+        consecutive_safe_readings = 0
+        required_safe_readings = 3  # Require 3 consecutive safe readings
         
-        if not is_safe:
-            reason = f"Volatility {volatility_pct:.4f}% too high for {growth_rate*100:.2f}% growth rate (max: {max_volatility:.4f}%)"
-        else:
-            reason = f"Volatility {volatility_pct:.4f}% is safe for {growth_rate*100:.2f}% growth rate (max: {max_volatility:.4f}%)"
+        best_volatility = None
+        best_trend = None
         
-        return is_safe, reason, max_volatility
-    
-async def wait_for_low_volatility_window(self, max_wait_time=600, check_interval=15):
-    """
-    ENHANCED SAFETY VERSION
-    
-    Key improvements:
-    1. NO TIMEOUT FALLBACK - If we don't find safe conditions, we DON'T trade
-    2. Checks volatility safety for MULTIPLE growth rates
-    3. Requires SUSTAINED low volatility (not just one reading)
-    4. More conservative thresholds
-    
-    Returns: (can_trade, volatility, trend, reason)
-    """
-    if not self.pre_trade_volatility_check:
-        trade_logger.info("⚠️ Pre-trade volatility check DISABLED - proceeding without checks")
-        return True, 0, "disabled", "Check disabled by configuration"
-    
-    trade_logger.info(f"🔍 STRICT SAFETY CHECK: Waiting for LOW volatility window (timeout: {max_wait_time}s)")
-    trade_logger.info(f"⚠️ Will NOT trade if safe conditions aren't found within {max_wait_time}s")
-    
-    start_time = datetime.now()
-    attempts = 0
-    consecutive_safe_readings = 0
-    required_safe_readings = 3  # Require 3 consecutive safe readings
-    
-    best_volatility = None
-    best_trend = None
-    
-    while (datetime.now() - start_time).total_seconds() < max_wait_time:
-        attempts += 1
-        elapsed = (datetime.now() - start_time).total_seconds()
-        
-        # Get recent tick data with extended history for better analysis
-        volatility, prices = await self.analyze_tick_volatility(periods=50)
-        
-        if volatility is None:
-            trade_logger.warning(f"❌ Attempt {attempts} ({elapsed:.0f}s): Failed to get volatility data")
-            consecutive_safe_readings = 0
-            await asyncio.sleep(check_interval)
-            continue
-        
-        # Track best readings seen
-        if best_volatility is None or volatility < best_volatility:
-            best_volatility = volatility
-        
-        # Enhanced volatility window check with stricter thresholds
-        is_low_vol, pct_vol, trend = self.volatility_analyzer.is_low_volatility_window(
-            self.price_history, 
-            threshold=self.max_entry_volatility
-        )
-        
-        best_trend = trend
-        
-        # CRITICAL: Test if volatility is safe for MULTIPLE growth rates
-        # We want conditions that work for at least moderate growth rates
-        test_growth_rates = [0.05, 0.04, 0.03, 0.025, 0.02]
-        compatible_rates = []
-        
-        for test_rate in test_growth_rates:
-            is_safe, reason, max_vol = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
-                pct_vol, test_rate
-            )
-            if is_safe:
-                compatible_rates.append(test_rate)
-        
-        trade_logger.info(
-            f"📊 Attempt {attempts} ({elapsed:.0f}s): "
-            f"Vol={pct_vol:.4f}%, Trend={trend}, LowVol={is_low_vol}, "
-            f"CompatibleRates={len(compatible_rates)}/{len(test_growth_rates)}"
-        )
-        
-        # Strict entry criteria:
-        # 1. Must be in low volatility window
-        # 2. Trend must not be "increasing"
-        # 3. Must be compatible with at least 3 growth rate tiers
-        # 4. Volatility must be below our max threshold
-        is_safe_entry = (
-            is_low_vol and 
-            trend != "increasing" and 
-            len(compatible_rates) >= 3 and
-            pct_vol < self.max_entry_volatility
-        )
-        
-        if is_safe_entry:
-            consecutive_safe_readings += 1
-            trade_logger.info(
-                f"✓ SAFE reading {consecutive_safe_readings}/{required_safe_readings}: "
-                f"Vol={pct_vol:.4f}%, Trend={trend}, Compatible with {len(compatible_rates)} rates"
+        while (datetime.now() - start_time).total_seconds() < max_wait_time:
+            attempts += 1
+            elapsed = (datetime.now() - start_time).total_seconds()
+            
+            # Get recent tick data with extended history for better analysis
+            volatility, prices = await self.analyze_tick_volatility(periods=50)
+            
+            if volatility is None:
+                trade_logger.warning(f"❌ Attempt {attempts} ({elapsed:.0f}s): Failed to get volatility data")
+                consecutive_safe_readings = 0
+                await asyncio.sleep(check_interval)
+                continue
+            
+            # Track best readings seen
+            if best_volatility is None or volatility < best_volatility:
+                best_volatility = volatility
+            
+            # Enhanced volatility window check with stricter thresholds
+            is_low_vol, pct_vol, trend = self.volatility_analyzer.is_low_volatility_window(
+                self.price_history, 
+                threshold=self.max_entry_volatility
             )
             
-            if consecutive_safe_readings >= required_safe_readings:
-                self.pre_trade_volatility = pct_vol
-                self.volatility_trend = trend
-                
-                trade_logger.info("=" * 80)
-                trade_logger.info(f"✅ CONFIRMED SAFE ENTRY WINDOW DETECTED!")
-                trade_logger.info(f"   Volatility: {pct_vol:.4f}% (threshold: {self.max_entry_volatility:.4f}%)")
-                trade_logger.info(f"   Trend: {trend}")
-                trade_logger.info(f"   Compatible with {len(compatible_rates)}/{len(test_growth_rates)} growth rates")
-                trade_logger.info(f"   Consecutive safe readings: {consecutive_safe_readings}")
-                trade_logger.info(f"   Time taken: {elapsed:.1f}s")
-                trade_logger.info("=" * 80)
-                
-                return True, pct_vol, trend, f"Safe entry confirmed after {attempts} checks"
-        else:
-            # Reset counter if we get an unsafe reading
-            if consecutive_safe_readings > 0:
-                trade_logger.warning(
-                    f"⚠️ Safe streak broken at {consecutive_safe_readings}/{required_safe_readings}. "
-                    f"Reason: Vol={pct_vol:.4f}%, Trend={trend}, LowVol={is_low_vol}"
+            best_trend = trend
+            
+            # CRITICAL: Test if volatility is safe for MULTIPLE growth rates
+            # We want conditions that work for at least moderate growth rates
+            test_growth_rates = [0.05, 0.04, 0.03, 0.025, 0.02]
+            compatible_rates = []
+            
+            for test_rate in test_growth_rates:
+                is_safe, reason, max_vol = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
+                    pct_vol, test_rate
                 )
-            consecutive_safe_readings = 0
+                if is_safe:
+                    compatible_rates.append(test_rate)
             
-            # Provide detailed rejection reason
-            rejection_reasons = []
-            if not is_low_vol:
-                rejection_reasons.append(f"Volatility too high ({pct_vol:.4f}% > {self.max_entry_volatility:.4f}%)")
-            if trend == "increasing":
-                rejection_reasons.append("Volatility trend is increasing")
-            if len(compatible_rates) < 3:
-                rejection_reasons.append(f"Only compatible with {len(compatible_rates)}/5 growth rates")
+            trade_logger.info(
+                f"📊 Attempt {attempts} ({elapsed:.0f}s): "
+                f"Vol={pct_vol:.4f}%, Trend={trend}, LowVol={is_low_vol}, "
+                f"CompatibleRates={len(compatible_rates)}/{len(test_growth_rates)}"
+            )
             
-            trade_logger.info(f"✗ Unsafe: {', '.join(rejection_reasons)}")
+            # Strict entry criteria:
+            # 1. Must be in low volatility window
+            # 2. Trend must not be "increasing"
+            # 3. Must be compatible with at least 3 growth rate tiers
+            # 4. Volatility must be below our max threshold
+            is_safe_entry = (
+                is_low_vol and 
+                trend != "increasing" and 
+                len(compatible_rates) >= 3 and
+                pct_vol < self.max_entry_volatility
+            )
+            
+            if is_safe_entry:
+                consecutive_safe_readings += 1
+                trade_logger.info(
+                    f"✓ SAFE reading {consecutive_safe_readings}/{required_safe_readings}: "
+                    f"Vol={pct_vol:.4f}%, Trend={trend}, Compatible with {len(compatible_rates)} rates"
+                )
+                
+                if consecutive_safe_readings >= required_safe_readings:
+                    self.pre_trade_volatility = pct_vol
+                    self.volatility_trend = trend
+                    
+                    trade_logger.info("=" * 80)
+                    trade_logger.info(f"✅ CONFIRMED SAFE ENTRY WINDOW DETECTED!")
+                    trade_logger.info(f"   Volatility: {pct_vol:.4f}% (threshold: {self.max_entry_volatility:.4f}%)")
+                    trade_logger.info(f"   Trend: {trend}")
+                    trade_logger.info(f"   Compatible with {len(compatible_rates)}/{len(test_growth_rates)} growth rates")
+                    trade_logger.info(f"   Consecutive safe readings: {consecutive_safe_readings}")
+                    trade_logger.info(f"   Time taken: {elapsed:.1f}s")
+                    trade_logger.info("=" * 80)
+                    
+                    return True, pct_vol, trend, f"Safe entry confirmed after {attempts} checks"
+            else:
+                # Reset counter if we get an unsafe reading
+                if consecutive_safe_readings > 0:
+                    trade_logger.warning(
+                        f"⚠️ Safe streak broken at {consecutive_safe_readings}/{required_safe_readings}. "
+                        f"Reason: Vol={pct_vol:.4f}%, Trend={trend}, LowVol={is_low_vol}"
+                    )
+                consecutive_safe_readings = 0
+                
+                # Provide detailed rejection reason
+                rejection_reasons = []
+                if not is_low_vol:
+                    rejection_reasons.append(f"Volatility too high ({pct_vol:.4f}% > {self.max_entry_volatility:.4f}%)")
+                if trend == "increasing":
+                    rejection_reasons.append("Volatility trend is increasing")
+                if len(compatible_rates) < 3:
+                    rejection_reasons.append(f"Only compatible with {len(compatible_rates)}/5 growth rates")
+                
+                trade_logger.info(f"✗ Unsafe: {', '.join(rejection_reasons)}")
+            
+            await asyncio.sleep(check_interval)
         
-        await asyncio.sleep(check_interval)
-    
-    # CRITICAL: NO FALLBACK - Reject trade if we didn't find safe conditions
-    elapsed_total = (datetime.now() - start_time).total_seconds()
-    
-    trade_logger.error("=" * 80)
-    trade_logger.error(f"❌ TRADE REJECTED: No safe entry window found")
-    trade_logger.error(f"   Time elapsed: {elapsed_total:.1f}s / {max_wait_time}s")
-    trade_logger.error(f"   Total attempts: {attempts}")
-    trade_logger.error(f"   Best volatility seen: {best_volatility:.4f}% (threshold: {self.max_entry_volatility:.4f}%)")
-    trade_logger.error(f"   Best trend: {best_trend}")
-    trade_logger.error(f"   Consecutive safe readings achieved: {consecutive_safe_readings}/{required_safe_readings}")
-    trade_logger.error(f"   ⚠️ NOT FORCING TRADE - Market conditions not suitable")
-    trade_logger.error("=" * 80)
-    
-    return False, best_volatility, best_trend, f"Timeout - no safe conditions after {attempts} attempts"
+        # CRITICAL: NO FALLBACK - Reject trade if we didn't find safe conditions
+        elapsed_total = (datetime.now() - start_time).total_seconds()
+        
+        trade_logger.error("=" * 80)
+        trade_logger.error(f"❌ TRADE REJECTED: No safe entry window found")
+        trade_logger.error(f"   Time elapsed: {elapsed_total:.1f}s / {max_wait_time}s")
+        trade_logger.error(f"   Total attempts: {attempts}")
+        trade_logger.error(f"   Best volatility seen: {best_volatility:.4f}% (threshold: {self.max_entry_volatility:.4f}%)")
+        trade_logger.error(f"   Best trend: {best_trend}")
+        trade_logger.error(f"   Consecutive safe readings achieved: {consecutive_safe_readings}/{required_safe_readings}")
+        trade_logger.error(f"   ⚠️ NOT FORCING TRADE - Market conditions not suitable")
+        trade_logger.error("=" * 80)
+        
+        return False, best_volatility, best_trend, f"Timeout - no safe conditions after {attempts} attempts"
 
     def calculate_realtime_volatility(self):
-        """IMPROVEMENT #3: Calculate real-time volatility from tick data"""
+        """Calculate real-time volatility from tick data"""
         if len(self.price_history) < 5:
             return None
         
@@ -769,61 +771,61 @@ async def wait_for_low_volatility_window(self, max_wait_time=600, check_interval
         
         return rate, tier
     
-async def select_optimal_growth_rate(self):
-    """
-    ENHANCED VERSION with safety verification
-    
-    Improvements:
-    1. Re-checks volatility safety after selecting growth rate
-    2. Ensures selected rate is compatible with current volatility
-    3. Falls back to more conservative rate if needed
-    """
-    volatility, _ = await self.analyze_tick_volatility()
-    
-    if volatility is None:
-        trade_logger.error("❌ Cannot select growth rate - no volatility data")
-        return None  # Signal to abort trade
-    
-    self.volatility = volatility
-    self.initial_volatility = volatility
-    
-    # Select initial growth rate
-    rate, tier = self.select_growth_rate_for_volatility(volatility)
-    
-    # CRITICAL: Verify this rate is actually safe for current volatility
-    is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
-        volatility, rate
-    )
-    
-    if not is_safe:
-        trade_logger.warning(f"⚠️ Initially selected rate {rate*100:.2f}% is NOT safe: {reason}")
+    async def select_optimal_growth_rate(self):
+        """
+        ENHANCED VERSION with safety verification
         
-        # Try progressively more conservative rates
-        fallback_rates = [0.025, 0.02, 0.015, 0.01]
-        for fallback_rate in fallback_rates:
-            is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
-                volatility, fallback_rate
-            )
-            if is_safe:
-                rate = fallback_rate
-                tier = f"Fallback-{rate*100:.2f}%"
-                trade_logger.info(f"✓ Using fallback rate: {rate*100:.2f}% ({reason})")
-                break
-        else:
-            # No safe rate found!
-            trade_logger.error(f"❌ NO SAFE GROWTH RATE found for volatility {volatility:.4f}%")
+        Improvements:
+        1. Re-checks volatility safety after selecting growth rate
+        2. Ensures selected rate is compatible with current volatility
+        3. Falls back to more conservative rate if needed
+        """
+        volatility, _ = await self.analyze_tick_volatility()
+        
+        if volatility is None:
+            trade_logger.error("❌ Cannot select growth rate - no volatility data")
             return None  # Signal to abort trade
-    
-    trade_logger.info("=" * 80)
-    trade_logger.info(f"✓ GROWTH RATE SELECTION CONFIRMED")
-    trade_logger.info(f"   Volatility Tier: {tier}")
-    trade_logger.info(f"   Current Volatility: {volatility:.4f}%")
-    trade_logger.info(f"   Selected Growth Rate: {rate*100:.2f}%")
-    trade_logger.info(f"   Max Safe Volatility for this rate: {max_allowed:.4f}%")
-    trade_logger.info(f"   Safety Status: {reason}")
-    trade_logger.info("=" * 80)
-    
-    return rate
+        
+        self.volatility = volatility
+        self.initial_volatility = volatility
+        
+        # Select initial growth rate
+        rate, tier = self.select_growth_rate_for_volatility(volatility)
+        
+        # CRITICAL: Verify this rate is actually safe for current volatility
+        is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
+            volatility, rate
+        )
+        
+        if not is_safe:
+            trade_logger.warning(f"⚠️ Initially selected rate {rate*100:.2f}% is NOT safe: {reason}")
+            
+            # Try progressively more conservative rates
+            fallback_rates = [0.025, 0.02, 0.015, 0.01]
+            for fallback_rate in fallback_rates:
+                is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
+                    volatility, fallback_rate
+                )
+                if is_safe:
+                    rate = fallback_rate
+                    tier = f"Fallback-{rate*100:.2f}%"
+                    trade_logger.info(f"✓ Using fallback rate: {rate*100:.2f}% ({reason})")
+                    break
+            else:
+                # No safe rate found!
+                trade_logger.error(f"❌ NO SAFE GROWTH RATE found for volatility {volatility:.4f}%")
+                return None  # Signal to abort trade
+        
+        trade_logger.info("=" * 80)
+        trade_logger.info(f"✓ GROWTH RATE SELECTION CONFIRMED")
+        trade_logger.info(f"   Volatility Tier: {tier}")
+        trade_logger.info(f"   Current Volatility: {volatility:.4f}%")
+        trade_logger.info(f"   Selected Growth Rate: {rate*100:.2f}%")
+        trade_logger.info(f"   Max Safe Volatility for this rate: {max_allowed:.4f}%")
+        trade_logger.info(f"   Safety Status: {reason}")
+        trade_logger.info("=" * 80)
+        
+        return rate
 
     def calculate_target_ticks(self, growth_rate):
         """Dynamically calculate target ticks based on growth rate"""
@@ -843,118 +845,117 @@ async def select_optimal_growth_rate(self):
         trade_logger.info(f"Target ticks calculated: {ticks} for growth rate: {growth_rate*100:.2f}%")
         return ticks
     
-async def check_and_switch_growth_rate(self, tick_count, current_profit):
-    """
-    ENHANCED VERSION with safety verification before switching
-    
-    Improvements:
-    1. Verifies new rate is safe for current volatility
-    2. Never switches to higher rate if volatility increased
-    3. Always switches to lower rate if volatility spiked
-    """
-    if not self.enable_growth_rate_switching:
-        return False
-    
-    if tick_count % self.growth_rate_switch_interval != 0:
-        return False
-    
-    # Calculate current volatility from tick data
-    current_vol = self.calculate_realtime_volatility()
-    if current_vol is None:
-        return False
-    
-    # Determine optimal growth rate for current conditions
-    optimal_rate, tier = self.select_growth_rate_for_volatility(current_vol)
-    
-    # CRITICAL: Verify the optimal rate is actually safe
-    is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
-        current_vol, optimal_rate
-    )
-    
-    if not is_safe:
-        trade_logger.warning(
-            f"⚠️ Optimal rate {optimal_rate*100:.2f}% is UNSAFE for current volatility {current_vol:.4f}%"
-        )
+    async def check_and_switch_growth_rate(self, tick_count, current_profit):
+        """
+        ENHANCED VERSION with safety verification before switching
         
-        # If current rate is also unsafe, we should exit the trade!
-        current_safe, current_reason, current_max = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
-            current_vol, self.current_growth_rate
-        )
-        
-        if not current_safe:
-            trade_logger.error(
-                f"🚨 CURRENT RATE {self.current_growth_rate*100:.2f}% ALSO UNSAFE! "
-                f"Volatility {current_vol:.4f}% exceeds max {current_max:.4f}%"
-            )
-            # This signals the monitoring function to exit
-            # You may want to set a flag here to trigger exit
+        Improvements:
+        1. Verifies new rate is safe for current volatility
+        2. Never switches to higher rate if volatility increased
+        3. Always switches to lower rate if volatility spiked
+        """
+        if not self.enable_growth_rate_switching:
             return False
         
-        # Don't switch if optimal isn't safe
-        return False
-    
-    # Calculate volatility change ratio
-    vol_change_ratio = current_vol / self.initial_volatility if self.initial_volatility > 0 else 1.0
-    
-    # SAFETY RULES for switching:
-    # 1. If volatility increased significantly (>20%), only switch to LOWER rates
-    # 2. If volatility decreased, can switch to higher rates
-    # 3. Always verify safety before switching
-    
-    should_switch = False
-    switch_reason = ""
-    
-    if optimal_rate < self.current_growth_rate:
-        # Switching to more conservative rate - always allowed if safe
-        should_switch = True
-        switch_reason = "volatility_increased"
-    elif optimal_rate > self.current_growth_rate:
-        # Switching to more aggressive rate - only if volatility decreased
-        if vol_change_ratio < 0.8:  # Volatility decreased by 20%+
+        if tick_count % self.growth_rate_switch_interval != 0:
+            return False
+        
+        # Calculate current volatility from tick data
+        current_vol = self.calculate_realtime_volatility()
+        if current_vol is None:
+            return False
+        
+        # Determine optimal growth rate for current conditions
+        optimal_rate, tier = self.select_growth_rate_for_volatility(current_vol)
+        
+        # CRITICAL: Verify the optimal rate is actually safe
+        is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
+            current_vol, optimal_rate
+        )
+        
+        if not is_safe:
+            trade_logger.warning(
+                f"⚠️ Optimal rate {optimal_rate*100:.2f}% is UNSAFE for current volatility {current_vol:.4f}%"
+            )
+            
+            # If current rate is also unsafe, we should exit the trade!
+            current_safe, current_reason, current_max = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
+                current_vol, self.current_growth_rate
+            )
+            
+            if not current_safe:
+                trade_logger.error(
+                    f"🚨 CURRENT RATE {self.current_growth_rate*100:.2f}% ALSO UNSAFE! "
+                    f"Volatility {current_vol:.4f}% exceeds max {current_max:.4f}%"
+                )
+                # This signals the monitoring function to exit
+                return False
+            
+            # Don't switch if optimal isn't safe
+            return False
+        
+        # Calculate volatility change ratio
+        vol_change_ratio = current_vol / self.initial_volatility if self.initial_volatility > 0 else 1.0
+        
+        # SAFETY RULES for switching:
+        # 1. If volatility increased significantly (>20%), only switch to LOWER rates
+        # 2. If volatility decreased, can switch to higher rates
+        # 3. Always verify safety before switching
+        
+        should_switch = False
+        switch_reason = ""
+        
+        if optimal_rate < self.current_growth_rate:
+            # Switching to more conservative rate - always allowed if safe
             should_switch = True
-            switch_reason = "volatility_decreased"
-        else:
-            trade_logger.info(
-                f"ℹ️ Not switching to higher rate {optimal_rate*100:.2f}% - "
-                f"volatility hasn't decreased enough (ratio: {vol_change_ratio:.2f})"
-            )
-            return False
-    
-    # Check if difference is significant enough (0.5% threshold)
-    if should_switch and abs(optimal_rate - self.current_growth_rate) >= 0.005:
-        old_rate = self.current_growth_rate
-        self.current_growth_rate = optimal_rate
-        self.growth_rate_switches += 1
+            switch_reason = "volatility_increased"
+        elif optimal_rate > self.current_growth_rate:
+            # Switching to more aggressive rate - only if volatility decreased
+            if vol_change_ratio < 0.8:  # Volatility decreased by 20%+
+                should_switch = True
+                switch_reason = "volatility_decreased"
+            else:
+                trade_logger.info(
+                    f"ℹ️ Not switching to higher rate {optimal_rate*100:.2f}% - "
+                    f"volatility hasn't decreased enough (ratio: {vol_change_ratio:.2f})"
+                )
+                return False
         
-        trade_logger.info("=" * 80)
-        trade_logger.info(f"⚡ SAFE GROWTH RATE SWITCH #{self.growth_rate_switches}")
-        trade_logger.info(f"   Tick: {tick_count}")
-        trade_logger.info(f"   Volatility: {current_vol:.4f}% (Initial: {self.initial_volatility:.4f}%)")
-        trade_logger.info(f"   Volatility Change: {vol_change_ratio:.2f}x")
-        trade_logger.info(f"   Tier: {tier}")
-        trade_logger.info(f"   Rate Change: {old_rate*100:.2f}% → {optimal_rate*100:.2f}%")
-        trade_logger.info(f"   Reason: {switch_reason}")
-        trade_logger.info(f"   Safety Status: {reason}")
-        trade_logger.info(f"   Current Profit: ${current_profit:.2f}")
-        trade_logger.info("=" * 80)
+        # Check if difference is significant enough (0.5% threshold)
+        if should_switch and abs(optimal_rate - self.current_growth_rate) >= 0.005:
+            old_rate = self.current_growth_rate
+            self.current_growth_rate = optimal_rate
+            self.growth_rate_switches += 1
+            
+            trade_logger.info("=" * 80)
+            trade_logger.info(f"⚡ SAFE GROWTH RATE SWITCH #{self.growth_rate_switches}")
+            trade_logger.info(f"   Tick: {tick_count}")
+            trade_logger.info(f"   Volatility: {current_vol:.4f}% (Initial: {self.initial_volatility:.4f}%)")
+            trade_logger.info(f"   Volatility Change: {vol_change_ratio:.2f}x")
+            trade_logger.info(f"   Tier: {tier}")
+            trade_logger.info(f"   Rate Change: {old_rate*100:.2f}% → {optimal_rate*100:.2f}%")
+            trade_logger.info(f"   Reason: {switch_reason}")
+            trade_logger.info(f"   Safety Status: {reason}")
+            trade_logger.info(f"   Current Profit: ${current_profit:.2f}")
+            trade_logger.info("=" * 80)
+            
+            log_system_event('INFO', 'SafeGrowthRateSwitch', 
+                           f'Trade {self.trade_id} - Rate switched safely', {
+                               'tick': tick_count,
+                               'old_rate': old_rate,
+                               'new_rate': optimal_rate,
+                               'volatility': current_vol,
+                               'volatility_ratio': vol_change_ratio,
+                               'tier': tier,
+                               'profit': current_profit,
+                               'safety_verified': is_safe,
+                               'reason': switch_reason
+                           })
+            
+            return True
         
-        log_system_event('INFO', 'SafeGrowthRateSwitch', 
-                       f'Trade {self.trade_id} - Rate switched safely', {
-                           'tick': tick_count,
-                           'old_rate': old_rate,
-                           'new_rate': optimal_rate,
-                           'volatility': current_vol,
-                           'volatility_ratio': vol_change_ratio,
-                           'tier': tier,
-                           'profit': current_profit,
-                           'safety_verified': is_safe,
-                           'reason': switch_reason
-                       })
+        return False
         
-        return True
-    
-    return False
-    
     async def check_trading_conditions(self):
         today = datetime.now().date().isoformat()
         session = get_session_data(today)
@@ -1056,131 +1057,131 @@ async def check_and_switch_growth_rate(self, tick_count, current_profit):
             trade_logger.error(f"Request failed: {e}")
         return None
 
-async def place_accumulator_trade(self):
-    """
-    ENHANCED VERSION with multi-level safety checks
-    
-    Improvements:
-    1. NO FALLBACK - Will reject if conditions aren't perfect
-    2. Verifies safety at every step
-    3. Re-checks before final trade placement
-    """
-    try:
-        balance = await self.get_balance()
-        if balance < self.stake_per_trade:
-            trade_logger.error(f"❌ Insufficient balance: ${balance:.2f} < ${self.stake_per_trade:.2f}")
-            return None, "Insufficient balance"
+    async def place_accumulator_trade(self):
+        """
+        ENHANCED VERSION with multi-level safety checks
         
-        if not self.symbol_available:
-            if not await self.validate_symbol():
-                return None, "Symbol validation failed"
-        
-        # STEP 1: Wait for safe volatility window
-        trade_logger.info("🔍 STEP 1/3: Checking for safe volatility window...")
-        can_enter, pre_vol, trend, reason = await self.wait_for_low_volatility_window()
-        
-        if not can_enter:
-            trade_logger.error(f"❌ TRADE REJECTED IN STEP 1: {reason}")
-            return None, f"Volatility check failed: {reason}"
-        
-        trade_logger.info(f"✅ STEP 1 PASSED: Safe volatility window confirmed")
-        
-        # STEP 2: Select safe growth rate
-        trade_logger.info("🔍 STEP 2/3: Selecting and verifying growth rate...")
-        if self.mode == 'adaptive':
-            self.current_growth_rate = await self.select_optimal_growth_rate()
+        Improvements:
+        1. NO FALLBACK - Will reject if conditions aren't perfect
+        2. Verifies safety at every step
+        3. Re-checks before final trade placement
+        """
+        try:
+            balance = await self.get_balance()
+            if balance < self.stake_per_trade:
+                trade_logger.error(f"❌ Insufficient balance: ${balance:.2f} < ${self.stake_per_trade:.2f}")
+                return None, "Insufficient balance"
             
-            if self.current_growth_rate is None:
-                trade_logger.error(f"❌ TRADE REJECTED IN STEP 2: No safe growth rate found")
-                return None, "No safe growth rate available for current volatility"
+            if not self.symbol_available:
+                if not await self.validate_symbol():
+                    return None, "Symbol validation failed"
             
-            self.target_ticks = self.calculate_target_ticks(self.current_growth_rate)
-        else:
-            # Even in fixed mode, verify safety
-            self.current_growth_rate = self.fixed_growth_rate
-            is_safe, reason, max_vol = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
-                pre_vol, self.current_growth_rate
+            # STEP 1: Wait for safe volatility window
+            trade_logger.info("🔍 STEP 1/3: Checking for safe volatility window...")
+            can_enter, pre_vol, trend, reason = await self.wait_for_low_volatility_window()
+            
+            if not can_enter:
+                trade_logger.error(f"❌ TRADE REJECTED IN STEP 1: {reason}")
+                return None, f"Volatility check failed: {reason}"
+            
+            trade_logger.info(f"✅ STEP 1 PASSED: Safe volatility window confirmed")
+            
+            # STEP 2: Select safe growth rate
+            trade_logger.info("🔍 STEP 2/3: Selecting and verifying growth rate...")
+            if self.mode == 'adaptive':
+                self.current_growth_rate = await self.select_optimal_growth_rate()
+                
+                if self.current_growth_rate is None:
+                    trade_logger.error(f"❌ TRADE REJECTED IN STEP 2: No safe growth rate found")
+                    return None, "No safe growth rate available for current volatility"
+                
+                self.target_ticks = self.calculate_target_ticks(self.current_growth_rate)
+            else:
+                # Even in fixed mode, verify safety
+                self.current_growth_rate = self.fixed_growth_rate
+                is_safe, reason, max_vol = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
+                    pre_vol, self.current_growth_rate
+                )
+                
+                if not is_safe:
+                    trade_logger.error(f"❌ TRADE REJECTED IN STEP 2: Fixed growth rate is unsafe - {reason}")
+                    return None, f"Fixed growth rate unsafe: {reason}"
+                
+                self.target_ticks = self.fixed_target_ticks
+            
+            trade_logger.info(f"✅ STEP 2 PASSED: Growth rate {self.current_growth_rate*100:.2f}% verified safe")
+            
+            # STEP 3: Final volatility re-check before placing trade
+            trade_logger.info("🔍 STEP 3/3: Final volatility verification before trade placement...")
+            final_vol, _ = await self.analyze_tick_volatility(periods=20)
+            
+            if final_vol is None:
+                trade_logger.error(f"❌ TRADE REJECTED IN STEP 3: Cannot get final volatility reading")
+                return None, "Cannot verify final volatility"
+            
+            # Verify volatility hasn't spiked since we started
+            if final_vol > self.max_entry_volatility * 1.1:  # Allow 10% tolerance
+                trade_logger.error(
+                    f"❌ TRADE REJECTED IN STEP 3: Volatility spiked during setup! "
+                    f"{final_vol:.4f}% > {self.max_entry_volatility:.4f}%"
+                )
+                return None, f"Volatility spike detected: {final_vol:.4f}%"
+            
+            # Final safety check for selected growth rate
+            is_final_safe, final_reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
+                final_vol, self.current_growth_rate
             )
             
-            if not is_safe:
-                trade_logger.error(f"❌ TRADE REJECTED IN STEP 2: Fixed growth rate is unsafe - {reason}")
-                return None, f"Fixed growth rate unsafe: {reason}"
+            if not is_final_safe:
+                trade_logger.error(f"❌ TRADE REJECTED IN STEP 3: Final safety check failed - {final_reason}")
+                return None, f"Final safety check failed: {final_reason}"
             
-            self.target_ticks = self.fixed_target_ticks
-        
-        trade_logger.info(f"✅ STEP 2 PASSED: Growth rate {self.current_growth_rate*100:.2f}% verified safe")
-        
-        # STEP 3: Final volatility re-check before placing trade
-        trade_logger.info("🔍 STEP 3/3: Final volatility verification before trade placement...")
-        final_vol, _ = await self.analyze_tick_volatility(periods=20)
-        
-        if final_vol is None:
-            trade_logger.error(f"❌ TRADE REJECTED IN STEP 3: Cannot get final volatility reading")
-            return None, "Cannot verify final volatility"
-        
-        # Verify volatility hasn't spiked since we started
-        if final_vol > self.max_entry_volatility * 1.1:  # Allow 10% tolerance
-            trade_logger.error(
-                f"❌ TRADE REJECTED IN STEP 3: Volatility spiked during setup! "
-                f"{final_vol:.4f}% > {self.max_entry_volatility:.4f}%"
-            )
-            return None, f"Volatility spike detected: {final_vol:.4f}%"
-        
-        # Final safety check for selected growth rate
-        is_final_safe, final_reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
-            final_vol, self.current_growth_rate
-        )
-        
-        if not is_final_safe:
-            trade_logger.error(f"❌ TRADE REJECTED IN STEP 3: Final safety check failed - {final_reason}")
-            return None, f"Final safety check failed: {final_reason}"
-        
-        trade_logger.info(f"✅ STEP 3 PASSED: Final volatility {final_vol:.4f}% confirmed safe")
-        
-        # ALL CHECKS PASSED - Proceed with trade
-        trade_logger.info("=" * 80)
-        trade_logger.info("✅ ALL SAFETY CHECKS PASSED - PLACING TRADE")
-        trade_logger.info(f"   Pre-Trade Volatility: {pre_vol:.4f}%")
-        trade_logger.info(f"   Final Volatility: {final_vol:.4f}%")
-        trade_logger.info(f"   Trend: {trend}")
-        trade_logger.info(f"   Growth Rate: {self.current_growth_rate*100:.2f}%")
-        trade_logger.info(f"   Target Ticks: {self.target_ticks}")
-        trade_logger.info(f"   Stake: ${self.stake_per_trade:.2f}")
-        trade_logger.info("=" * 80)
-        
-        proposal_request = {
-            "proposal": 1,
-            "amount": self.stake_per_trade,
-            "basis": "stake",
-            "contract_type": self.contract_type,
-            "currency": "USD",
-            "symbol": self.symbol,
-            "growth_rate": self.current_growth_rate
-        }
-        
-        proposal_response = await self.send_request(proposal_request)
-        if not proposal_response or "error" in proposal_response:
-            trade_logger.error("❌ Proposal failed")
-            return None, "Proposal failed"
-        
-        proposal_id = proposal_response["proposal"]["id"]
-        ask_price = proposal_response["proposal"]["ask_price"]
-        
-        buy_request = {"buy": proposal_id, "price": ask_price}
-        buy_response = await self.send_request(buy_request)
-        
-        if not buy_response or "error" in buy_response:
-            trade_logger.error("❌ Buy failed")
-            return None, "Buy failed"
-        
-        contract_id = buy_response["buy"]["contract_id"]
-        trade_logger.info(f"✅ TRADE PLACED SUCCESSFULLY - Contract ID: {contract_id}")
-        
-        return contract_id, None
-        
-    except Exception as e:
-        trade_logger.error(f"❌ Place trade exception: {e}")
-        return None, str(e)
+            trade_logger.info(f"✅ STEP 3 PASSED: Final volatility {final_vol:.4f}% confirmed safe")
+            
+            # ALL CHECKS PASSED - Proceed with trade
+            trade_logger.info("=" * 80)
+            trade_logger.info("✅ ALL SAFETY CHECKS PASSED - PLACING TRADE")
+            trade_logger.info(f"   Pre-Trade Volatility: {pre_vol:.4f}%")
+            trade_logger.info(f"   Final Volatility: {final_vol:.4f}%")
+            trade_logger.info(f"   Trend: {trend}")
+            trade_logger.info(f"   Growth Rate: {self.current_growth_rate*100:.2f}%")
+            trade_logger.info(f"   Target Ticks: {self.target_ticks}")
+            trade_logger.info(f"   Stake: ${self.stake_per_trade:.2f}")
+            trade_logger.info("=" * 80)
+            
+            proposal_request = {
+                "proposal": 1,
+                "amount": self.stake_per_trade,
+                "basis": "stake",
+                "contract_type": self.contract_type,
+                "currency": "USD",
+                "symbol": self.symbol,
+                "growth_rate": self.current_growth_rate
+            }
+            
+            proposal_response = await self.send_request(proposal_request)
+            if not proposal_response or "error" in proposal_response:
+                trade_logger.error("❌ Proposal failed")
+                return None, "Proposal failed"
+            
+            proposal_id = proposal_response["proposal"]["id"]
+            ask_price = proposal_response["proposal"]["ask_price"]
+            
+            buy_request = {"buy": proposal_id, "price": ask_price}
+            buy_response = await self.send_request(buy_request)
+            
+            if not buy_response or "error" in buy_response:
+                trade_logger.error("❌ Buy failed")
+                return None, "Buy failed"
+            
+            contract_id = buy_response["buy"]["contract_id"]
+            trade_logger.info(f"✅ TRADE PLACED SUCCESSFULLY - Contract ID: {contract_id}")
+            
+            return contract_id, None
+            
+        except Exception as e:
+            trade_logger.error(f"❌ Place trade exception: {e}")
+            return None, str(e)
     
     async def monitor_contract(self, contract_id):
         try:
@@ -1260,10 +1261,10 @@ async def place_accumulator_trade(self):
                             tick_count += 1
                             trade_logger.debug(f"Tick {tick_count}: Profit=${current_profit:.2f}, Max=${max_profit:.2f}")
                             
-                            # IMPROVEMENT #2: Dynamic growth rate switching
+                            # Dynamic growth rate switching
                             await self.check_and_switch_growth_rate(tick_count, current_profit)
                         
-                        # IMPROVEMENT #3: Enhanced volatility monitoring with tick data
+                        # Enhanced volatility monitoring with tick data
                         if tick_count - last_volatility_check >= self.volatility_check_interval:
                             current_volatility = self.calculate_realtime_volatility()
                             last_volatility_check = tick_count
@@ -1509,6 +1510,7 @@ async def place_accumulator_trade(self):
                 except:
                     pass
             gc.collect()
+
 
 def run_async_trade_in_thread(api_token, app_id, parameters, trade_id):
     try:
