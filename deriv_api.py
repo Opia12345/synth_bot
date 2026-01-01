@@ -2703,7 +2703,7 @@ def dashboard():
             try {
                 const [tradesRes, sessionRes] = await Promise.all([
                     fetch('/api/trades'),
-                    fetch('/api/session')
+                    fetch('/session')
                 ]);
                 
                 const trades = await tradesRes.json();
