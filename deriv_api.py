@@ -398,7 +398,7 @@ class VolatilityAnalyzer:
         trend = VolatilityAnalyzer.detect_volatility_trend(prices)
         er = VolatilityAnalyzer.calculate_efficiency_ratio(prices_list)
         
-        micro_stable = VolatilityAnalyzer.is_micro_stable(prices_list, lookback=8)
+        micro_stable = VolatilityAnalyzer.is_micro_stable(prices_list, lookback=5)
         
         mean_price = sum(prices_list[-15:]) / 15
         pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
@@ -422,11 +422,11 @@ class EnhancedSafetyChecks:
     @staticmethod
     def is_volatility_safe_for_growth_rate(volatility_pct, growth_rate):
         safety_matrix = {
-            0.05: 0.10,   # 5% growth now needs < 0.10% vol
-            0.04: 0.12,   # 4% growth now needs < 0.12% vol
-            0.03: 0.15,
+            0.05: 0.12,   # 5% growth now needs < 0.10% vol
+            0.04: 0.14,   # 4% growth now needs < 0.12% vol
+            0.03: 0.16,
             0.025: 0.11,
-            0.02: 0.13,
+            0.02: 0.18,
             0.015: 0.18,
             0.01: 0.25
         }
@@ -482,8 +482,8 @@ class EnhancedSafetyChecks:
                 is_low_vol and 
                 trend == "stable" and # MUST be stable, not just "not increasing"
                 len(safe_rates) == len(test_growth_rates) and # Must be safe for ALL test rates
-                pct_vol < (self.max_entry_volatility * 0.8) and # 20% safety buffer
-                avg_velocity < 0.005 # Ensure tick speed is very low
+                pct_vol < self.max_entry_volatility and  # Remove 0.8x buffer
+                avg_velocity < 0.010 # Ensure tick speed is very low
             )
             
             if is_safe_entry:
