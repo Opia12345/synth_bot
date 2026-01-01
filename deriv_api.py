@@ -448,7 +448,7 @@ class EnhancedSafetyChecks:
         return is_safe, reason, max_volatility
 
     async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=20):
-        if not self.pre_trade_volatility_check:
+        if not getattr(self, 'pre_trade_volatility_check', True):
             trade_logger.info("⚠️ Pre-trade volatility check DISABLED")
             return True, 0, "disabled", "Check disabled"
         
