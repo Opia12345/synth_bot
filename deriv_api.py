@@ -1457,7 +1457,7 @@ class DerivAccumulatorBot:
         start_time = datetime.now()
         attempts = 0
         consecutive_safe_readings = 0
-        required_safe_readings = 5  # Require 5 consecutive safe readings (up from 3)
+        required_safe_readings = 3  # Require 5 consecutive safe readings (up from 3)
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
             attempts += 1
