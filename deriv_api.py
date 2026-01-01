@@ -324,6 +324,41 @@ class VolatilityAnalyzer:
         return sum(true_ranges[-period:]) / period
 
     @staticmethod
+    def calculate_tick_metrics(prices):
+        """Calculate velocity and acceleration of price movements"""
+        if len(prices) < 3:
+            return 0, 0
+        
+        # Velocity: average absolute change per tick
+        velocities = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
+        avg_velocity = sum(velocities) / len(velocities)
+        
+        # Acceleration: change in velocity
+        accelerations = [abs(velocities[i] - velocities[i-1]) for i in range(1, len(velocities))]
+        avg_acceleration = sum(accelerations) / len(accelerations) if accelerations else 0
+        
+        return avg_velocity, avg_acceleration
+
+    @staticmethod
+    def is_micro_stable(prices, lookback=5, max_tick_move_pct=0.01):
+        """Verify that the last N ticks are extremely quiet individually"""
+        if len(prices) < lookback + 1:
+            return False
+        
+        recent_ticks = list(prices)[-lookback:]
+        mean_price = sum(recent_ticks) / len(recent_ticks)
+        
+        for i in range(1, len(recent_ticks)):
+            tick_move = abs(recent_ticks[i] - recent_ticks[i-1])
+            tick_move_pct = (tick_move / mean_price) * 100
+            
+            # If any single tick moves more than the micro-threshold, it's not quiet
+            if tick_move_pct > max_tick_move_pct:
+                return False
+        
+        return True
+
+    @staticmethod
     def calculate_efficiency_ratio(prices, period=10):
         if len(prices) < period:
             return 0
@@ -363,14 +398,17 @@ class VolatilityAnalyzer:
         trend = VolatilityAnalyzer.detect_volatility_trend(prices)
         er = VolatilityAnalyzer.calculate_efficiency_ratio(prices_list)
         
+        micro_stable = VolatilityAnalyzer.is_micro_stable(prices_list, lookback=8)
+        
         mean_price = sum(prices_list[-15:]) / 15
         pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
         
         is_low_vol = (
             pct_volatility < threshold and 
-            trend == "stable" and # MUST be stable, not just "not increasing"
-            cv < 1.5 and # Lower CV threshold
-            er < 0.3 # ER < 0.3 indicates a non-trending, choppy/calm market
+            trend == "stable" and
+            cv < 1.5 and 
+            er < 0.3 and
+            micro_stable # MUST be micro-stable (no sudden small jumps)
         )
         
         return is_low_vol, pct_volatility, trend
@@ -409,185 +447,6 @@ class EnhancedSafetyChecks:
         
         return is_safe, reason, max_volatility
 
-
-class DerivAccumulatorBot:
-    def __init__(self, api_token, app_id, trade_id, parameters):
-        self.api_token = api_token
-        self.app_id = app_id
-        self.trade_id = trade_id
-        self.stake_per_trade = parameters.get('stake', 5.0)
-        self.symbol = parameters.get('symbol', '1HZ10V')
-        self.mode = parameters.get('mode', 'adaptive')
-        self.fixed_growth_rate = parameters.get('growth_rate', 0.02)
-        self.fixed_target_ticks = parameters.get('target_ticks', 4)
-        
-        self.max_daily_trades = parameters.get('max_daily_trades', 15)
-        self.max_consecutive_losses = parameters.get('max_consecutive_losses', 2)
-        self.daily_loss_limit_pct = parameters.get('daily_loss_limit_pct', 0.03)
-        
-        self.profit_target_pct = parameters.get('profit_target_pct', 0.25)
-        self.stop_loss_pct = parameters.get('stop_loss_pct', 0.5)
-        self.trailing_stop_pct = parameters.get('trailing_stop_pct', 0.3)
-        
-        # Enhanced volatility parameters
-        self.pre_trade_volatility_check = parameters.get('pre_trade_volatility_check', True)
-        self.max_entry_volatility = parameters.get('max_entry_volatility', 0.15)  # 0.15% max for entry
-        self.volatility_check_interval = parameters.get('volatility_check_interval', 1)
-        self.volatility_exit_threshold = parameters.get('volatility_exit_threshold', 1.5)
-        
-        # Dynamic growth rate switching
-        self.enable_growth_rate_switching = parameters.get('enable_growth_rate_switching', True)
-        self.growth_rate_switch_interval = parameters.get('growth_rate_switch_interval', 3)  # Check every 3 ticks
-        
-        self.current_growth_rate = None
-        self.growth_rate_switches = 0
-        self.target_ticks = None
-        self.volatility = None
-        self.initial_volatility = None
-        self.pre_trade_volatility = None
-        self.volatility_trend = None
-        
-        self.ws_urls = [
-            f"wss://ws.derivws.com/websockets/v3?app_id={app_id}",
-            f"wss://wscluster1.deriv.com/websockets/v3?app_id={app_id}",
-            f"wss://wscluster2.deriv.com/websockets/v3?app_id={app_id}",
-        ]
-        self.ws_url = self.ws_urls[0]
-        self.ws = None
-        self.request_id = 0
-        self.account_balance = 0.0
-        self.initial_balance = 0.0
-        self.symbol_available = False
-        self.contract_type = "ACCU"
-        
-        # Extended price history for better analysis
-        self.price_history = deque(maxlen=100) # Increased history size for analysis
-        self.trade_start_time = None
-        self.entry_spot = None
-        self.exit_spot = None
-        
-        self.volatility_analyzer = VolatilityAnalyzer()
-        
-        trade_logger.info(f"Bot initialized - Trade ID: {trade_id}, Symbol: {self.symbol}, Mode: {self.mode}")
-        
-    def get_next_request_id(self):
-        self.request_id += 1
-        return self.request_id
-        
-    async def connect(self, retry_count=0, max_retries=3):
-        for ws_url in self.ws_urls:
-            self.ws_url = ws_url
-            try:
-                trade_logger.info(f"Attempting connection to {ws_url}")
-                self.ws = await asyncio.wait_for(
-                    websockets.connect(self.ws_url, ping_interval=None, close_timeout=5),
-                    timeout=15.0
-                )
-                auth_success = await self.authorize()
-                if not auth_success:
-                    trade_logger.warning(f"Authorization failed on {ws_url}")
-                    try:
-                        await self.ws.close()
-                    except:
-                        pass
-                    self.ws = None
-                    raise Exception("Authorization failed")
-                trade_logger.info(f"Successfully connected and authorized on {ws_url}")
-                return True
-            except Exception as e:
-                trade_logger.error(f"Connection failed to {ws_url}: {e}")
-                if self.ws:
-                    try:
-                        await self.ws.close()
-                    except:
-                        pass
-                    self.ws = None
-                continue
-        
-        if retry_count < max_retries:
-            wait_time = 10 * (2 ** retry_count)
-            trade_logger.info(f"Retry {retry_count + 1}/{max_retries} in {wait_time}s")
-            await asyncio.sleep(wait_time)
-            return await self.connect(retry_count + 1, max_retries)
-        else:
-            trade_logger.error("Failed to connect after all retries")
-            raise Exception("Failed to connect after retries")
-    
-    async def authorize(self):
-        if not self.api_token:
-            trade_logger.error("No API token provided")
-            return False
-        
-        try:
-            auth_request = {
-                "authorize": self.api_token,
-                "req_id": self.get_next_request_id()
-            }
-            await self.ws.send(json.dumps(auth_request))
-            
-            response = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
-            data = json.loads(response)
-            
-            if "error" in data:
-                trade_logger.error(f"Authorization error: {data['error']}")
-                return False
-            
-            if "authorize" in data:
-                self.account_balance = float(data['authorize']['balance'])
-                self.initial_balance = self.account_balance
-                trade_logger.info(f"Authorized successfully. Balance: ${self.account_balance:.2f}")
-                return True
-        except Exception as e:
-            trade_logger.error(f"Authorization exception: {e}")
-        return False
-    
-    async def get_balance(self):
-        try:
-            balance_request = {"balance": 1, "subscribe": 0, "req_id": self.get_next_request_id()}
-            response_data = await self.send_request(balance_request)
-            
-            if response_data and "balance" in response_data:
-                self.account_balance = float(response_data["balance"]["balance"])
-                trade_logger.debug(f"Balance updated: ${self.account_balance:.2f}")
-                return self.account_balance
-        except Exception as e:
-            trade_logger.error(f"Failed to get balance: {e}")
-        return self.account_balance
-    
-    async def analyze_tick_volatility(self, periods=50):
-        """Enhanced tick-based volatility analysis with mathematical calculations"""
-        try:
-            ticks_request = {
-                "ticks_history": self.symbol,
-                "count": periods,
-                "end": "latest",
-                "style": "ticks",
-                "req_id": self.get_next_request_id()
-            }
-            response = await self.send_request(ticks_request)
-            
-            if response and "history" in response:
-                prices = [float(p) for p in response["history"]["prices"]]
-                if len(prices) >= 10:
-                    # Store in price history
-                    self.price_history.extend(prices)
-                    
-                    # Calculate comprehensive volatility metrics
-                    std_dev = self.volatility_analyzer.calculate_standard_deviation(prices)
-                    cv = self.volatility_analyzer.calculate_coefficient_of_variation(prices)
-                    atr = self.volatility_analyzer.calculate_atr(prices)
-                    
-                    # Calculate percentage-based volatility
-                    mean_price = sum(prices) / len(prices)
-                    pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
-                    
-                    trade_logger.info(f"Tick Volatility Analysis - StdDev: {std_dev:.6f}, CV: {cv:.4f}%, ATR: {atr:.6f}, Pct: {pct_volatility:.4f}%")
-                    
-                    return pct_volatility, prices
-        except Exception as e:
-            trade_logger.error(f"Tick volatility analysis failed: {e}")
-        return None, None
-
     async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=20):
         if not self.pre_trade_volatility_check:
             trade_logger.info("⚠️ Pre-trade volatility check DISABLED")
@@ -614,6 +473,8 @@ class DerivAccumulatorBot:
                 threshold=self.max_entry_volatility
             )
             
+            avg_velocity, avg_acceleration = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-20:])
+            
             test_growth_rates = [0.05, 0.03, 0.02]
             safe_rates = [r for r in test_growth_rates if EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, r)[0]]
             
@@ -621,19 +482,21 @@ class DerivAccumulatorBot:
                 is_low_vol and 
                 trend == "stable" and # MUST be stable, not just "not increasing"
                 len(safe_rates) == len(test_growth_rates) and # Must be safe for ALL test rates
-                pct_vol < (self.max_entry_volatility * 0.8) # 20% safety buffer
+                pct_vol < (self.max_entry_volatility * 0.8) and # 20% safety buffer
+                avg_velocity < 0.005 # Ensure tick speed is very low
             )
             
             if is_safe_entry:
                 consecutive_safe_readings += 1
-                trade_logger.info(f"✓ CALM reading {consecutive_safe_readings}/{required_safe_readings}")
+                trade_logger.info(f"✓ CALM reading {consecutive_safe_readings}/{required_safe_readings} | Vol: {pct_vol:.4f}% | Velocity: {avg_velocity:.6f}")
                 if consecutive_safe_readings >= required_safe_readings:
                     self.pre_trade_volatility = pct_vol
                     self.volatility_trend = trend
                     return True, pct_vol, trend, "Market confirmed calm"
             else:
                 if consecutive_safe_readings > 0:
-                    trade_logger.warning("❌ Market noise detected - Resetting safety timer")
+                    rejection_reason = "Noise" if not is_low_vol else "Trend" if trend != "stable" else "Velocity"
+                    trade_logger.warning(f"❌ Market {rejection_reason} detected - Resetting safety timer | Vol: {pct_vol:.4f}%, Trend: {trend}, Velocity: {avg_velocity:.6f}")
                 consecutive_safe_readings = 0
             
             await asyncio.sleep(check_interval)
@@ -641,18 +504,6 @@ class DerivAccumulatorBot:
         trade_logger.error("🚫 SKIP TRADE: Market too volatile or noisy. Conditions not met.")
         return False, None, None, "Market conditions unsuitable"
 
-    def calculate_realtime_volatility(self):
-        """Calculate real-time volatility from tick data"""
-        if len(self.price_history) < 5:
-            return None
-        
-        prices = list(self.price_history)[-15:]  # Use last 15 ticks
-        mean_price = sum(prices) / len(prices)
-        std_dev = self.volatility_analyzer.calculate_standard_deviation(prices)
-        
-        pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
-        return pct_volatility
-    
     def select_growth_rate_for_volatility(self, volatility):
         """Select optimal growth rate based on current volatility"""
         # More aggressive thresholds for faster adaptation
@@ -695,8 +546,7 @@ class DerivAccumulatorBot:
             trade_logger.error("❌ Cannot select growth rate - no volatility data")
             return None  # Signal to abort trade
         
-        self.volatility = volatility
-        self.initial_volatility = volatility
+        self.initial_volatility = volatility # Store initial volatility for the trade
         
         # Select initial growth rate
         rate, tier = self.select_growth_rate_for_volatility(volatility)
@@ -1008,7 +858,7 @@ class DerivAccumulatorBot:
             else:
                 # Even in fixed mode, verify safety
                 self.current_growth_rate = self.fixed_growth_rate
-                is_safe, reason, max_vol = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
+                is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
                     pre_vol, self.current_growth_rate
                 )
                 
@@ -1022,11 +872,17 @@ class DerivAccumulatorBot:
             
             # STEP 3: Final volatility re-check
             trade_logger.info("🔍 STEP 3/3: Final split-second safety check...")
-            final_vol, _ = await self.analyze_tick_volatility(periods=30)
+            final_vol, final_prices = await self.analyze_tick_volatility(periods=30)
             
-            if final_vol is None or final_vol > pre_vol * 1.05:
-                trade_logger.error("🚫 ABORTING: Micro-spike detected during setup")
-                return None, "Micro-spike detected"
+            if final_vol is None:
+                return None, "Failed to get final volatility"
+
+            is_micro_ok = self.volatility_analyzer.is_micro_stable(final_prices, lookback=5)
+            final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-10:])
+
+            if final_vol > pre_vol * 1.05 or not is_micro_ok or final_vel > 0.008:
+                trade_logger.error(f"🚫 ABORTING: Micro-instability detected (Vol: {final_vol:.4f}, Micro: {is_micro_ok}, Vel: {final_vel:.6f})")
+                return None, "Micro-instability detected at execution"
             
             # Final safety check for selected growth rate
             is_final_safe, final_reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
@@ -1412,19 +1268,345 @@ class DerivAccumulatorBot:
                     pass
             gc.collect()
 
+class DerivAccumulatorBot:
+    def __init__(self, api_token, app_id, trade_id, parameters):
+        self.api_token = api_token
+        self.app_id = app_id
+        self.trade_id = trade_id
+        self.parameters = parameters if isinstance(parameters, dict) else {}
+        self.symbol = self.parameters.get('symbol', '1HZ10V')
+        self.stake_per_trade = self.parameters.get('stake', 1.0) # Renamed from 'stake' to 'stake_per_trade' for clarity
+        self.contract_type = "NON_SAL" # Assuming accumulator contract type
+        self.max_entry_volatility = self.parameters.get('max_entry_volatility', 0.10)
+        self.pre_trade_volatility_check = self.parameters.get('pre_trade_volatility_check', True)
+        self.enable_growth_rate_switching = self.parameters.get('enable_growth_rate_switching', True)
+        self.growth_rate_switch_interval = self.parameters.get('growth_rate_switch_interval', 3)
+        self.volatility_check_interval = self.parameters.get('volatility_check_interval', 1)
+        self.volatility_exit_threshold = self.parameters.get('volatility_exit_threshold', 1.5)
+        self.profit_target_pct = self.parameters.get('profit_target_pct', 0.25)
+        self.stop_loss_pct = self.parameters.get('stop_loss_pct', 0.5)
+        self.trailing_stop_pct = self.parameters.get('trailing_stop_pct', 0.3)
+        self.max_daily_trades = self.parameters.get('max_daily_trades', 15)
+        self.max_consecutive_losses = self.parameters.get('max_consecutive_losses', 3)
+        self.daily_loss_limit_pct = self.parameters.get('daily_loss_limit_pct', 0.03)
+        self.fixed_growth_rate = self.parameters.get('growth_rate', 0.02) # For fixed mode
+        self.fixed_target_ticks = self.parameters.get('target_ticks', 5) # For fixed mode
+        self.mode = self.parameters.get('mode', 'adaptive') # 'adaptive' or 'fixed'
+
+        self.price_history = deque(maxlen=200)
+        self.volatility_analyzer = VolatilityAnalyzer()
+        self.safety_checks = EnhancedSafetyChecks() # Instantiate safety checks
+        self.stop_event = asyncio.Event()
+        self.ws = None
+        
+        # Internal state
+        self.pre_trade_volatility = 0
+        self.initial_volatility = 0 # Track initial volatility for rate switching
+        self.volatility_trend = "stable"
+        self.current_growth_rate = 0 # Current growth rate during the trade
+        self.target_ticks = 0 # Target ticks for the current trade
+        self.growth_rate_switches = 0 # Counter for growth rate switches
+        self.contract_id = None
+        self.initial_balance = 0
+        self.final_balance = 0
+        self.profit = 0
+        self.status = "pending"
+        self.entry_spot = None
+        self.exit_spot = None
+        self.symbol_available = False # Flag to check if symbol is available
+        self._request_id_counter = 0 # Counter for WebSocket request IDs
+
+    def get_next_request_id(self):
+        self._request_id_counter += 1
+        return self._request_id_counter
+
+    async def connect(self):
+        uri = f"wss://ws.binaryws.com/websockets/v3?app_id={self.app_id}"
+        try:
+            self.ws = await websockets.connect(uri)
+            await self.ws.send(json.dumps({"authorize": self.api_token}))
+            auth_res = await self.ws.recv()
+            auth_data = json.loads(auth_res)
+            if "error" in auth_data:
+                trade_logger.error(f"Authentication failed: {auth_data['error']['message']}")
+                raise Exception(auth_data["error"]["message"])
+            self.initial_balance = auth_data["authorize"]["balance"]
+            trade_logger.info(f"Connected and authenticated. Initial balance: ${self.initial_balance:.2f}")
+            return True
+        except Exception as e:
+            trade_logger.error(f"Connection failed: {e}")
+            return False
+            
+    async def get_balance(self):
+        try:
+            req_id = self.get_next_request_id()
+            await self.ws.send(json.dumps({"balance": 1, "subscribe": 1, "req_id": req_id}))
+            while True:
+                res_text = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
+                data = json.loads(res_text)
+                if data.get("req_id") == req_id:
+                    return float(data["balance"]["balance"])
+                if "subscription" in data and data["subscription"]["id"] == str(req_id):
+                    return float(data["balance"]["balance"])
+        except Exception as e:
+            trade_logger.error(f"Failed to get balance: {e}")
+            return self.initial_balance # Fallback to initial balance if error
+
+    async def subscribe_ticks(self):
+        """Subscribes to ticks for the current symbol."""
+        req_id = self.get_next_request_id()
+        await self.ws.send(json.dumps({
+            "ticks": self.symbol,
+            "subscribe": 1,
+            "req_id": req_id
+        }))
+        trade_logger.info(f"Subscribed to ticks for {self.symbol}")
+
+    async def analyze_tick_volatility(self, periods=100):
+        """
+        Ensures enough price data is collected and calculates volatility.
+        This method is called frequently for real-time analysis.
+        """
+        if len(self.price_history) < periods:
+            # trade_logger.debug(f"Waiting for enough tick data... (have {len(self.price_history)}/{periods})")
+            return None, list(self.price_history) # Return None if not enough data
+
+        recent_prices = list(self.price_history)[-periods:]
+        if not recent_prices:
+            return None, []
+
+        std_dev = self.volatility_analyzer.calculate_standard_deviation(recent_prices)
+        mean_price = sum(recent_prices) / len(recent_prices)
+        
+        if mean_price == 0:
+            return 0, recent_prices # Avoid division by zero
+
+        pct_volatility = (std_dev / abs(mean_price)) * 100
+        return pct_volatility, recent_prices
+
+    def calculate_realtime_volatility(self):
+        """Calculates current volatility using the last N ticks (e.g., 20)."""
+        if len(self.price_history) < 20: # Ensure enough data for a meaningful calculation
+            return None
+        
+        # Use a slightly shorter history for real-time volatility check within trades
+        vol, _ = self.analyze_tick_volatility(periods=20) 
+        return vol
+
+    async def execute_trade(self):
+        """Main trade execution flow with enhanced safety checks."""
+        try:
+            self.status = "running"
+            self.growth_rate_switches = 0 # Reset switch counter for each trade
+            self.entry_spot = None
+            self.exit_spot = None
+            self.pre_trade_volatility = 0 # Reset pre-trade volatility
+            self.volatility_trend = "stable" # Reset trend
+            self.initial_volatility = 0 # Reset initial volatility
+
+            if not await self.connect():
+                self.status = "failed"
+                return
+
+            await self.subscribe_ticks() # Subscribe to ticks after connecting
+            
+            # STEP 1: Aggressive pre-trade filtering for a CALM market window
+            trade_logger.info("🔍 ENTERING: Pre-trade CALM market check...")
+            can_enter, pre_vol, trend, reason = await self.safety_checks.wait_for_low_volatility_window(
+                max_wait_time=1800, # Increased wait time for calm conditions
+                check_interval=10  # Check more frequently
+            )
+            
+            if not can_enter:
+                self.status = "skipped"
+                trade_logger.warning(f"TRADE SKIPPED: {reason}")
+                log_system_event('WARNING', 'TradeExecution', f'Trade {self.trade_id} skipped due to market conditions', {'reason': reason})
+                return
+
+            self.pre_trade_volatility = pre_vol
+            self.volatility_trend = trend
+            trade_logger.info(f"✅ Pre-trade CALM window confirmed (Vol: {pre_vol:.4f}%, Trend: {trend})")
+            
+            # STEP 2: Select and verify the growth rate
+            trade_logger.info("🔍 Selecting and verifying growth rate...")
+            if self.mode == 'adaptive':
+                self.current_growth_rate = await self.safety_checks.select_optimal_growth_rate()
+                if self.current_growth_rate is None:
+                    self.status = "aborted"
+                    trade_logger.error("TRADE ABORTED: No safe adaptive growth rate found.")
+                    log_system_event('ERROR', 'TradeExecution', f'Trade {self.trade_id} aborted - no safe adaptive rate', {'pre_volatility': pre_vol})
+                    return
+            else: # Fixed mode
+                self.current_growth_rate = self.fixed_growth_rate
+                # Still verify safety for the fixed rate
+                is_safe, reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pre_vol, self.current_growth_rate)
+                if not is_safe:
+                    self.status = "aborted"
+                    trade_logger.error(f"TRADE ABORTED: Fixed growth rate {self.current_growth_rate*100:.2f}% is UNSAFE for pre-trade volatility {pre_vol:.4f}%: {reason}")
+                    log_system_event('ERROR', 'TradeExecution', f'Trade {self.trade_id} aborted - unsafe fixed rate', {'rate': self.current_growth_rate, 'pre_volatility': pre_vol})
+                    return
+            
+            self.target_ticks = self.safety_checks.calculate_target_ticks(self.current_growth_rate)
+            self.initial_volatility = self.current_growth_rate # Store initial volatility after rate selection
+
+            # STEP 3: Final Micro-stability check before placing the order
+            trade_logger.info("🔍 Performing final micro-stability check...")
+            # Use a small number of recent ticks for this immediate check
+            is_micro_stable = self.volatility_analyzer.is_micro_stable(list(self.price_history)[-10:], lookback=5) 
+            if not is_micro_stable:
+                self.status = "aborted"
+                trade_logger.warning("TRADE ABORTED: Micro-spike detected just before entry.")
+                log_system_event('WARNING', 'TradeExecution', f'Trade {self.trade_id} aborted due to micro-spike before entry')
+                return
+            
+            trade_logger.info("✅ Final micro-stability check passed.")
+
+            # STEP 4: Place the trade
+            trade_logger.info("Placing trade...")
+            contract_id, error = await self.place_accumulator_trade() # Uses the enhanced method
+            if error:
+                self.status = "failed"
+                trade_logger.error(f"Failed to place trade: {error}")
+                log_system_event('ERROR', 'TradeExecution', f'Trade {self.trade_id} failed to place', {'error': error})
+                return
+
+            self.contract_id = contract_id
+            trade_logger.info(f"Trade placed. Contract ID: {self.contract_id}")
+            
+            # STEP 5: Monitor the contract
+            monitor_result = await self.monitor_contract(self.contract_id)
+            self.profit = monitor_result.get("profit", 0)
+            self.exit_reason = monitor_result.get("exit_reason", "unknown")
+            self.ticks_completed = monitor_result.get("ticks_completed", 0)
+            self.duration_seconds = monitor_result.get("duration_seconds", 0)
+            self.entry_spot = monitor_result.get("entry_spot")
+            self.exit_spot = monitor_result.get("exit_spot")
+            volatility_at_exit = monitor_result.get("final_volatility")
+            
+            self.final_balance = await self.get_balance()
+            self.status = "completed"
+
+            # Update session data and save trade results
+            self.update_session_after_trade(self.profit)
+            self.save_trade_result(
+                success=True,
+                contract_id=self.contract_id,
+                profit=self.profit,
+                final_balance=self.final_balance,
+                initial_balance=self.initial_balance,
+                volatility=self.initial_volatility,
+                growth_rate=self.current_growth_rate,
+                target_ticks=self.target_ticks,
+                exit_reason=self.exit_reason,
+                max_profit_reached=monitor_result.get("max_profit_reached"),
+                ticks_completed=self.ticks_completed,
+                duration_seconds=self.duration_seconds,
+                entry_spot=self.entry_spot,
+                exit_spot=self.exit_spot,
+                volatility_at_exit=volatility_at_exit,
+                pre_trade_volatility=self.pre_trade_volatility,
+                growth_rate_switches=self.growth_rate_switches,
+                volatility_trend=self.volatility_trend
+            )
+            
+            log_system_event('INFO', 'TradeExecution', f'Trade {self.trade_id} completed', {
+                'profit': self.profit, 'exit_reason': self.exit_reason, 'duration': self.duration_seconds,
+                'switches': self.growth_rate_switches, 'initial_volatility': self.initial_volatility,
+                'final_volatility': volatility_at_exit
+            })
+
+        except Exception as e:
+            self.status = "failed"
+            trade_logger.error(f"An error occurred during trade execution: {e}", exc_info=True)
+            self.save_trade_result(
+                success=False, 
+                error=str(e),
+                status="failed"
+            )
+            log_system_event('ERROR', 'TradeExecution', f'Trade {self.trade_id} encountered an error', {'error': str(e)})
+        finally:
+            trade_completed()
+            if self.ws:
+                try:
+                    self.ws.close()
+                except:
+                    pass
+            gc.collect()
+
+    def save_trade_result(self, success, contract_id=None, profit=0, status="completed", error=None, **kwargs):
+        """Saves the final trade result to the database and trade_results dictionary."""
+        trade_data = {
+            'trade_id': self.trade_id,
+            'timestamp': datetime.now().isoformat(),
+            'app_id': self.app_id,
+            'status': status,
+            'success': 1 if success else 0,
+            'contract_id': contract_id,
+            'profit': profit,
+            'final_balance': self.final_balance,
+            'initial_balance': self.initial_balance,
+            'error': error,
+            'parameters': {
+                'stake': self.stake_per_trade,
+                'symbol': self.symbol,
+                'mode': self.mode,
+                'growth_rate_used': self.current_growth_rate,
+                'target_ticks_used': self.target_ticks,
+                'initial_volatility': self.initial_volatility,
+                'pre_trade_volatility': self.pre_trade_volatility,
+                'growth_rate_switches': self.growth_rate_switches,
+                'volatility_trend': self.volatility_trend,
+                **kwargs # Add any extra parameters passed
+            },
+            'volatility': kwargs.get('volatility', self.initial_volatility), # Use initial volatility if not specified
+            'growth_rate': kwargs.get('growth_rate', self.current_growth_rate),
+            'target_ticks': kwargs.get('target_ticks', self.target_ticks),
+            'exit_reason': kwargs.get('exit_reason'),
+            'max_profit_reached': kwargs.get('max_profit_reached'),
+            'ticks_completed': kwargs.get('ticks_completed'),
+            'duration_seconds': kwargs.get('duration_seconds'),
+            'entry_spot': kwargs.get('entry_spot'),
+            'exit_spot': kwargs.get('exit_spot'),
+            'volatility_at_exit': kwargs.get('volatility_at_exit'),
+            'pre_trade_volatility': kwargs.get('pre_trade_volatility', self.pre_trade_volatility),
+            'growth_rate_switches': kwargs.get('growth_rate_switches', self.growth_rate_switches),
+            'volatility_trend': kwargs.get('volatility_trend', self.volatility_trend)
+        }
+        save_trade(self.trade_id, trade_data)
+        trade_results[self.trade_id] = trade_data
+
 
 def run_async_trade_in_thread(api_token, app_id, parameters, trade_id):
+    """Runs the DerivAccumulatorBot in a separate thread using asyncio."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
+        # Instantiate the bot with the provided parameters
         bot = DerivAccumulatorBot(api_token, app_id, trade_id, parameters)
-        loop.run_until_complete(bot.execute_trade_async())
-        loop.close()
+        
+        # Run the asynchronous trade execution
+        loop.run_until_complete(bot.execute_trade())
+        
     except Exception as e:
-        logger.error(f"Thread execution error for {trade_id}: {e}")
+        logger.error(f"Thread execution error for {trade_id}: {e}", exc_info=True)
+        # Attempt to save an error state if the bot object was created
+        if 'bot' in locals() and bot:
+            bot.save_trade_result(success=False, error=f"Thread error: {e}", status="failed")
+        else: # If bot creation failed, log a generic error
+            save_trade(trade_id, {
+                'trade_id': trade_id, 
+                'timestamp': datetime.now().isoformat(), 
+                'app_id': app_id, 
+                'status': 'failed', 
+                'success': 0, 
+                'error': f"Thread execution failed: {e}"
+            })
+            trade_results[trade_id] = {'status': 'failed', 'error': f"Thread execution failed: {e}"}
+
     finally:
-        trade_completed()
+        loop.close()
+        trade_completed() # Decrement the active trade count
         gc.collect()
 
 
@@ -1447,9 +1629,9 @@ def execute_trade(app_id, api_token):
         parameters = {
             'stake': float(data.get('stake', 5.0)),
             'symbol': data.get('symbol', '1HZ10V'),
-            'mode': data.get('mode', 'adaptive'),
-            'growth_rate': float(data.get('growth_rate', 0.02)),
-            'target_ticks': int(data.get('target_ticks', 4)),
+            'mode': data.get('mode', 'adaptive'), # 'adaptive' or 'fixed'
+            'growth_rate': float(data.get('growth_rate', 0.02)), # Used in fixed mode
+            'target_ticks': int(data.get('target_ticks', 4)), # Used in fixed mode
             'max_daily_trades': int(data.get('max_daily_trades', 15)),
             'max_consecutive_losses': int(data.get('max_consecutive_losses', 3)),
             'daily_loss_limit_pct': float(data.get('daily_loss_limit_pct', 0.03)),
@@ -1458,10 +1640,10 @@ def execute_trade(app_id, api_token):
             'trailing_stop_pct': float(data.get('trailing_stop_pct', 0.3)),
             'volatility_check_interval': int(data.get('volatility_check_interval', 1)),
             'volatility_exit_threshold': float(data.get('volatility_exit_threshold', 1.5)),
-            'pre_trade_volatility_check': data.get('pre_trade_volatility_check', True),
-            'max_entry_volatility': float(data.get('max_entry_volatility', 0.15)),
-            'enable_growth_rate_switching': data.get('enable_growth_rate_switching', True),
-            'growth_rate_switch_interval': int(data.get('growth_rate_switch_interval', 3))
+            'pre_trade_volatility_check': data.get('pre_trade_volatility_check', True), # Enables the CALM market window check
+            'max_entry_volatility': float(data.get('max_entry_volatility', 0.10)), # Tighter threshold for CALM check
+            'enable_growth_rate_switching': data.get('enable_growth_rate_switching', True), # Enables dynamic switching during trade
+            'growth_rate_switch_interval': int(data.get('growth_rate_switch_interval', 3)) # Frequency of switching checks
         }
         
         new_trade_id = str(uuid.uuid4())
@@ -1475,7 +1657,7 @@ def execute_trade(app_id, api_token):
         save_trade(new_trade_id, initial_data)
         trade_results[new_trade_id] = initial_data
         
-        api_logger.info(f"Trade initiated - ID: {new_trade_id}, Symbol: {parameters['symbol']}")
+        api_logger.info(f"Trade initiated - ID: {new_trade_id}, Symbol: {parameters['symbol']}, Mode: {parameters['mode']}")
 
         thread = Thread(
             target=run_async_trade_in_thread,
@@ -1486,14 +1668,19 @@ def execute_trade(app_id, api_token):
         
         return jsonify({"status": "initiated", "trade_id": new_trade_id}), 202
     except Exception as e:
-        api_logger.error(f"Trade execution endpoint error: {e}")
-        trade_completed()
+        api_logger.error(f"Trade execution endpoint error: {e}", exc_info=True)
+        trade_completed() # Ensure trade count is decremented if an error occurs early
         return jsonify({"success": False, "error": "Internal Server Error"}), 500
 
 
 @app.route('/trade/<trade_id>', methods=['GET'])
 def get_trade_result(trade_id):
-    result = trade_results.get(trade_id) or get_trade(trade_id)
+    # First, check in memory cache for recently completed trades
+    result = trade_results.get(trade_id)
+    
+    # If not in memory, fetch from database
+    if not result:
+        result = get_trade(trade_id)
     
     if not result:
         return jsonify({"success": False, "error": "Trade ID not found"}), 404
@@ -1504,12 +1691,13 @@ def get_trade_result(trade_id):
         "timestamp": result.get('timestamp')
     }
     
-    if result.get('success') is not None or result.get('success') == 1:
+    # Check if the trade has been completed or failed/skipped/aborted
+    if result.get('status') in ['completed', 'failed', 'skipped', 'aborted']:
         profit = result.get('profit', 0)
         response.update({
             "success": bool(result.get('success')),
             "profit_loss": profit,
-            "result": "PROFIT" if profit > 0 else "LOSS",
+            "result": "PROFIT" if profit > 0 else ("LOSS" if profit < 0 else "NO CHANGE"),
             "amount": abs(profit),
             "contract_id": result.get('contract_id'),
             "final_balance": result.get('final_balance'),
@@ -1529,6 +1717,14 @@ def get_trade_result(trade_id):
             "growth_rate_switches": result.get('growth_rate_switches'),
             "error_details": result.get('error')
         })
+    else:
+        # For running trades, provide partial info
+        response.update({
+            "success": None,
+            "profit_loss": None,
+            "result": "RUNNING",
+            "error_details": None
+        })
     
     return jsonify(response), 200
 
@@ -1539,13 +1735,18 @@ def get_session_status():
     session = get_session_data(today)
     
     if not session:
+        # Initialize session if it doesn't exist
+        update_session_data(today, 0, 0, 0.0, 0)
+        session = get_session_data(today) # Fetch newly created session
+        
         return jsonify({
             "session_date": today,
             "trades_count": 0,
             "consecutive_losses": 0,
             "total_profit_loss": 0.0,
             "stopped": False,
-            "message": "No trades today"
+            "can_trade": True,
+            "message": "No trades today. Session initialized."
         }), 200
     
     return jsonify({
@@ -1562,9 +1763,10 @@ def get_session_status():
 @app.route('/session/reset', methods=['POST'])
 def reset_session():
     today = datetime.now().date().isoformat()
-    update_session_data(today, 0, 0, 0.0, 0)
-    api_logger.info("Trading session reset")
-    log_system_event('INFO', 'SessionManagement', 'Session reset performed', {'date': today})
+    # Reset session data
+    update_session_data(today, 0, 0, 0.0, 0) 
+    api_logger.info("Trading session reset via API")
+    log_system_event('INFO', 'SessionManagement', 'Session reset performed via API', {'date': today})
     return jsonify({"message": "Session reset successfully", "date": today}), 200
 
 
@@ -1573,25 +1775,39 @@ def get_all_trades_endpoint():
     all_trades = get_all_trades()
     filter_by = request.args.get('filter', 'today')
     
-    from datetime import date
+    from datetime import date, timedelta
     today = date.today()
     
     if filter_by == 'today':
+        # Filter trades from the current day
         filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
+    elif filter_by == 'yesterday':
+        yesterday = today - timedelta(days=1)
+        filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(yesterday.isoformat())]
+    elif filter_by == 'week':
+        # Filter trades from the last 7 days
+        start_of_week = today - timedelta(days=today.weekday()) # Monday of current week
+        end_of_week = start_of_week + timedelta(days=6)
+        filtered_trades = [t for t in all_trades if start_of_week.isoformat() <= t.get('timestamp', '').split('T')[0] <= end_of_week.isoformat()]
     elif filter_by == 'all':
         filtered_trades = all_trades
-    else:
+    else: # Default to 'today' if filter is unrecognized
         filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
     
-    all_status_trades = filtered_trades
+    # Separate trades by status
     completed = [t for t in filtered_trades if t.get('status') == 'completed']
     running = [t for t in filtered_trades if t.get('status') == 'running']
     pending = [t for t in filtered_trades if t.get('status') == 'pending']
-    
+    failed = [t for t in filtered_trades if t.get('status') == 'failed']
+    skipped = [t for t in filtered_trades if t.get('status') == 'skipped']
+    aborted = [t for t in filtered_trades if t.get('status') == 'aborted']
+
+    # Statistics for completed trades only
     wins = [t for t in completed if t.get('profit', 0) > 0]
     losses = [t for t in completed if t.get('profit', 0) <= 0]
     total_profit = sum(t.get('profit', 0) for t in completed)
     
+    # Calculate averages only if there are completed trades
     avg_volatility = sum(t.get('volatility', 0) or 0 for t in completed) / len(completed) if completed else 0
     avg_growth_rate = sum(t.get('growth_rate', 0) or 0 for t in completed) / len(completed) if completed else 0
     avg_duration = sum(t.get('duration_seconds', 0) or 0 for t in completed) / len(completed) if completed else 0
@@ -1602,15 +1818,17 @@ def get_all_trades_endpoint():
         reason = t.get('exit_reason', 'unknown')
         exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
     
+    # Convert trades to a dictionary keyed by trade_id for easier frontend access
     trades_dict = {}
-    for t in all_status_trades:
-        trade_dict = dict(t)
+    for t in filtered_trades:
+        trade_dict = dict(t) # Make a copy to avoid modifying original data
         trades_dict[trade_dict['trade_id']] = trade_dict
     
+    # Calculate win rate, avg win/loss, etc.
     if len(completed) > 0:
         win_rate = f"{(len(wins)/len(completed)*100):.2f}%"
     else:
-        win_rate = "0%"
+        win_rate = "0.00%"
     
     if losses:
         avg_loss = sum(abs(t.get('profit', 0)) for t in losses) / len(losses)
@@ -1625,14 +1843,28 @@ def get_all_trades_endpoint():
     else:
         avg_win = 0
         max_win = 0
+    
+    # Calculate Profit Factor
+    profit_factor = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0
+    if total_profit < 0 and avg_loss > 0: # Handle cases where total profit is negative but wins exist
+        profit_factor = round(sum(t.get('profit', 0) for t in wins) / sum(abs(t.get('profit', 0)) for t in losses) if sum(abs(t.get('profit', 0)) for t in losses) > 0 else 0, 2)
+    elif total_profit >= 0 and avg_loss == 0: # All wins
+        profit_factor = float('inf') # Or a large number to signify infinite profit factor
+    elif total_profit < 0 and avg_loss == 0: # Only losses, total profit negative
+        profit_factor = 0
+    elif total_profit == 0:
+        profit_factor = 0
 
     return jsonify({
         "filter": filter_by,
-        "date": today.isoformat(),
-        "total_trades": len(all_status_trades),
+        "date_range": f"{filtered_trades[0]['timestamp'].split('T')[0]} to {filtered_trades[-1]['timestamp'].split('T')[0]}" if filtered_trades else today.isoformat(),
+        "total_trades_in_filter": len(filtered_trades),
         "completed_trades": len(completed),
         "running_trades": len(running),
         "pending_trades": len(pending),
+        "failed_trades": len(failed),
+        "skipped_trades": len(skipped),
+        "aborted_trades": len(aborted),
         "wins": len(wins),
         "losses": len(losses),
         "win_rate": win_rate,
@@ -1645,7 +1877,7 @@ def get_all_trades_endpoint():
         "avg_loss": round(avg_loss, 2),
         "max_win": round(max_win, 2),
         "max_loss": round(max_loss, 2),
-        "profit_factor": round(avg_win / avg_loss, 2) if avg_loss > 0 else 0,
+        "profit_factor": profit_factor if profit_factor != float('inf') else "Infinite",
         "exit_reasons": exit_reasons,
         "trades": trades_dict
     }), 200
@@ -1664,7 +1896,9 @@ def health_check():
             "✓ Dynamic growth rate switching during trades",
             "✓ Real-time volatility monitoring",
             "✓ Advanced risk management",
-            "✓ Comprehensive analytics with growth rate switches tracking"
+            "✓ Comprehensive analytics with growth rate switches tracking",
+            "✓ CALM Market Entry (5 consecutive readings)",
+            "✓ Aggressive Safety: Skips trade if CALM conditions not met"
         ],
         "improvements": [
             "1. Waits for CALM market conditions (< 0.10% Vol, Stable Trend, Low ER/CV) before entry",
@@ -1725,295 +1959,199 @@ def get_optimal_config():
         },
         "usage": "POST /trade/<app_id>/<api_token> with JSON body containing these parameters"
     }), 200
+    
+@app.route('/api/trades')
+def api_trades():
+    # 1. Fetch historical trades from the database
+    db_trades = get_all_trades() 
+    
+    # 2. Capture currently active trades from memory
+    active_trades = []
+    with active_trades_lock:
+        for trade_id, data in trade_results.items():
+            # If it's still running, we want to show it in the table
+            if data.get('status') == 'running':
+                # Ensure we have the basic info needed for the UI
+                active_trades.append({
+                    'trade_id': trade_id,
+                    'timestamp': data.get('timestamp', datetime.now().isoformat()),
+                    'status': 'running',
+                    'parameters': data.get('parameters', {}),
+                    'profit': 0,
+                    'growth_rate': data.get('growth_rate', 0)
+                })
+    
+    # 3. Merge them: Don't duplicate if a trade just finished and is in both
+    active_ids = [t.get('trade_id') for t in active_trades]
+    combined_trades = active_trades + [dt for dt in db_trades if dt.get('trade_id') not in active_ids]
+    
+    # Return sorted by newest first
+    return jsonify(combined_trades[:50]) # Limit to last 50 for performance
 
 
 @app.route('/dashboard', methods=['GET'])
 def dashboard():
-    html = """<!DOCTYPE html>
-<html>
+    html = """
+<!DOCTYPE html>
+<html lang="en">
 <head>
-    <title>Enhanced Trading Dashboard</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Terminal | Professional Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; min-height: 100vh; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-        .container { max-width: 1600px; margin: 0 auto; }
-        .header { background: white; padding: 30px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
-        .header h1 { color: #2d3748; font-size: 32px; margin-bottom: 10px; }
-        .header p { color: #718096; font-size: 16px; }
-        .feature-badge { display: inline-block; background: #48bb78; color: white; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; margin: 4px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .stat-card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s; }
-        .stat-card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.2); }
-        .stat-label { font-size: 12px; color: #718096; margin-bottom: 8px; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; }
-        .stat-value { font-size: 28px; font-weight: bold; color: #2d3748; }
-        .stat-value.positive { color: #48bb78; }
-        .stat-value.negative { color: #f56565; }
-        .stat-value.neutral { color: #4299e1; }
-        .session-card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .session-status { display: inline-block; padding: 8px 20px; border-radius: 20px; font-weight: 600; font-size: 14px; }
-        .session-active { background: #48bb78; color: white; }
-        .session-stopped { background: #f56565; color: white; }
-        .controls { background: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-        .btn { padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.2s; }
-        .btn-primary { background: #667eea; color: white; }
-        .btn-primary:hover { background: #5a67d8; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }
-        .btn-success { background: #48bb78; color: white; }
-        .btn-success:hover { background: #38a169; }
-        .btn-info { background: #4299e1; color: white; }
-        .btn-info:hover { background: #3182ce; }
-        .select { padding: 12px; border-radius: 8px; border: 2px solid #e2e8f0; font-size: 14px; cursor: pointer; background: white; }
-        .trades-table { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); overflow-x: auto; }
-        .trades-table h2 { color: #2d3748; margin-bottom: 20px; font-size: 24px; }
-        table { width: 100%; border-collapse: collapse; min-width: 1400px; }
-        th { background: #4a5568; color: white; padding: 14px; text-align: left; font-weight: 600; font-size: 12px; text-transform: uppercase; position: sticky; top: 0; }
-        td { padding: 12px 14px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
-        tr:hover { background: #f7fafc; }
-        .win { color: #48bb78; font-weight: 700; }
-        .loss { color: #f56565; font-weight: 700; }
-        .running { color: #4299e1; font-weight: 700; }
-        .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-        .badge-success { background: #c6f6d5; color: #22543d; }
-        .badge-danger { background: #fed7d7; color: #742a2a; }
-        .badge-info { background: #bee3f8; color: #2c5282; }
-        .badge-warning { background: #feebc8; color: #7c2d12; }
-        .metric-highlight { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: 700; }
-        .status-running { animation: pulse 2s infinite; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+        body { font-family: 'Inter', sans-serif; background-color: #0b0e14; color: #e2e8f0; }
+        .glass { background: rgba(23, 27, 34, 0.8); backdrop-filter: blur(8px); border: 1px solid #1e293b; }
+        .status-badge { padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+        .win { background: rgba(16, 185, 129, 0.1); color: #10b981; }
+        .loss { background: rgba(239, 68, 68, 0.1); color: #ef4444; }
+        .running { background: rgba(59, 130, 246, 0.1); color: #3b82f6; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
 </head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🚀 Enhanced Trading Dashboard v4.0</h1>
-            <p>Aggressive market filtering with pre-trade CALM market detection, dynamic growth rate switching & tick-based analysis</p>
-            <div style="margin-top: 15px;">
-                <span class="feature-badge">✓ CALM Market Entry</span>
-                <span class="feature-badge">✓ Dynamic Growth Switching</span>
-                <span class="feature-badge">✓ Tick-Based Analysis</span>
+<body class="p-6">
+    <div class="max-w-6xl mx-auto">
+        <header class="flex justify-between items-center mb-8 border-b border-slate-800 pb-6">
+            <div>
+                <h1 class="text-xl font-bold tracking-tight">ACCUMULATOR <span class="text-blue-500 text-xs">v4.0 AGGRESSIVE</span></h1>
+                <p id="sync-status" class="text-slate-500 text-xs mt-1 italic">Last update: --:--:--</p>
             </div>
-            <p id="currentDate" style="margin-top: 12px; font-size: 15px; color: #4a5568;"></p>
-        </div>
-        
-        <div class="session-card" id="sessionCard">
-            <h3 style="margin-bottom: 15px; color: #2d3748;">📊 Today's Session Status</h3>
-            <div id="sessionStatus">Loading...</div>
-        </div>
-        
-        <div class="controls">
-            <button class="btn btn-primary" onclick="loadData()">🔄 Refresh Data</button>
-            <button class="btn btn-success" onclick="exportCSV()">📥 Export CSV</button>
-            <button class="btn btn-info" onclick="showOptimalConfig()">⚙️ View Config</button>
-            <select id="filterSelect" onchange="changeFilter()" class="select">
-                <option value="today">Today's Trades</option>
-                <option value="all">All Trades</option>
-            </select>
-            <div style="margin-left: auto; font-size: 13px; color: #4a5568;">
-                <strong>Auto-refresh:</strong> <span id="countdown">10</span>s
+            <div class="text-right">
+                <p class="text-slate-500 text-[10px] font-bold uppercase tracking-widest">Session P/L</p>
+                <h2 id="session-pl" class="text-2xl font-bold">$0.00</h2>
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <div class="glass p-5 rounded-xl">
+                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Total Executions</p>
+                <p id="stat-total" class="text-xl font-bold">0</p>
+            </div>
+            <div class="glass p-5 rounded-xl">
+                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Win Rate</p>
+                <p id="stat-winrate" class="text-xl font-bold">0%</p>
+            </div>
+            <div class="glass p-5 rounded-xl border-l-2 border-amber-500">
+                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Safety Skips</p>
+                <p id="stat-skipped" class="text-xl font-bold text-amber-500">0</p>
+            </div>
+            <div class="glass p-5 rounded-xl">
+                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Safety Status</p>
+                <p id="safety-label" class="text-xl font-bold text-emerald-500">Monitoring</p>
             </div>
         </div>
-        
-        <div class="stats-grid" id="stats">
-            <div class="stat-card"><div>Loading stats...</div></div>
-        </div>
-        
-        <div class="trades-table">
-            <h2>📊 Complete Trade History with Growth Rate Switches</h2>
-            <div style="max-height: 600px; overflow-y: auto;">
-                <table id="tradesTable">
-                    <thead>
-                        <tr>
-                            <th>Status</th>
-                            <th>Timestamp</th>
-                            <th>Trade ID</th>
-                            <th>Pre-Vol %</th>
-                            <th>Trend</th>
-                            <th>Exit Vol %</th>
-                            <th>Growth %</th>
-                            <th>Switches</th>
-                            <th>Ticks</th>
-                            <th>Duration</th>
-                            <th>Exit Reason</th>
-                            <th>Max P/L</th>
-                            <th>Final P/L</th>
-                            <th>Result</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tradesBody">
-                        <tr><td colspan="14">Loading trades...</td></tr>
-                    </tbody>
-                </table>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div class="lg:col-span-2 glass rounded-xl overflow-hidden">
+                <div class="px-6 py-4 border-b border-slate-800 bg-slate-900/50">
+                    <h3 class="font-bold text-sm">Execution Logs</h3>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-900/30 text-slate-500 text-[10px] uppercase">
+                            <tr>
+                                <th class="px-6 py-3">Time</th>
+                                <th class="px-6 py-3">Asset</th>
+                                <th class="px-6 py-3">Growth</th>
+                                <th class="px-6 py-3">Result</th>
+                                <th class="px-6 py-3 text-right">Profit</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trade-body" class="divide-y divide-slate-800">
+                            </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="space-y-6">
+                <div class="glass p-6 rounded-xl">
+                    <h3 class="text-amber-500 text-xs font-bold uppercase tracking-wider mb-4">Skipped (Market Noise)</h3>
+                    <div id="skip-log" class="space-y-3 max-h-[400px] overflow-y-auto pr-2 text-xs">
+                        <p class="text-slate-600 italic">No market rejections yet.</p>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
+
     <script>
-        let currentFilter = 'today';
-        let countdownTimer = 10;
-        
-        function changeFilter() {
-            currentFilter = document.getElementById('filterSelect').value;
-            loadData();
-        }
-        
-        async function loadSession() {
+        async function updateDashboard() {
             try {
-                const response = await fetch('/session');
-                const data = await response.json();
+                const [tradesRes, sessionRes] = await Promise.all([
+                    fetch('/api/trades'),
+                    fetch('/api/session')
+                ]);
                 
-                const statusClass = data.stopped ? 'session-stopped' : 'session-active';
-                const statusText = data.stopped ? '🔴 STOPPED' : '🟢 ACTIVE';
+                const trades = await tradesRes.json();
+                const session = await sessionRes.json();
                 
-                const sessionHtml = `
-                    <p style="margin-bottom: 15px;"><span class="session-status ${statusClass}">${statusText}</span></p>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
-                        <div><strong style="color: #718096;">Trades Today:</strong> <span style="font-size: 24px; font-weight: bold; color: #2d3748;">${data.trades_count}</span></div>
-                        <div><strong style="color: #718096;">Consecutive Losses:</strong> <span style="font-size: 24px; font-weight: bold; color: ${data.consecutive_losses >= 2 ? '#f56565' : '#2d3748'};">${data.consecutive_losses}</span></div>
-                        <div><strong style="color: #718096;">Total P/L:</strong> <span style="font-size: 24px; font-weight: bold;" class="${data.total_profit_loss >= 0 ? 'win' : 'loss'}">${data.total_profit_loss.toFixed(2)}</span></div>
-                    </div>
-                `;
-                document.getElementById('sessionStatus').innerHTML = sessionHtml;
-            } catch (error) {
-                console.error('Error loading session:', error);
-            }
+                renderTrades(trades);
+                updateStats(session, trades);
+                document.getElementById('sync-status').innerText = `Last update: ${new Date().toLocaleTimeString()}`;
+            } catch (e) { console.error("Update failed", e); }
         }
-        
-        async function loadData() {
-            try {
-                const response = await fetch(`/trades?filter=${currentFilter}`);
-                const data = await response.json();
-                
-                const dateStr = new Date(data.date).toLocaleDateString('en-US', { 
-                    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' 
-                });
-                document.getElementById('currentDate').textContent = 
-                    currentFilter === 'today' ? `📅 ${dateStr}` : '📅 All Time';
-                
-                const statsHtml = `
-                    <div class="stat-card">
-                        <div class="stat-label">Total Trades</div>
-                        <div class="stat-value">${data.total_trades || 0}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Completed</div>
-                        <div class="stat-value neutral">${data.completed_trades || 0}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Wins</div>
-                        <div class="stat-value positive">${data.wins || 0}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Losses</div>
-                        <div class="stat-value negative">${data.losses || 0}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Win Rate</div>
-                        <div class="stat-value">${data.win_rate || '0%'}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Total P/L</div>
-                        <div class="stat-value ${(data.total_profit_loss || 0) >= 0 ? 'positive' : 'negative'}">
-                            ${(data.total_profit_loss || 0).toFixed(2)}
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Avg Switches</div>
-                        <div class="stat-value neutral">${(data.avg_growth_rate_switches || 0).toFixed(1)}</div>
-                    </div>
-                `;
-                document.getElementById('stats').innerHTML = statsHtml;
-                
-                if (!data.trades || Object.keys(data.trades).length === 0) {
-                    document.getElementById('tradesBody').innerHTML = 
-                        '<tr><td colspan="14">No trades yet. Start trading to see results here.</td></tr>';
+
+        function renderTrades(trades) {
+            const tbody = document.getElementById('trade-body');
+            const skipLog = document.getElementById('skip-log');
+            tbody.innerHTML = '';
+            
+            let skipHtml = '';
+            let validTradesCount = 0;
+
+            trades.forEach(t => {
+                // Handle skipped trades separately
+                if (t.error && (t.error.includes("Safety") || t.error.includes("unsuitable") || t.error.includes("Noise"))) {
+                    skipHtml += `<div class="p-3 border-l-2 border-amber-500 bg-amber-500/5 rounded">
+                        <span class="text-slate-500 text-[10px]">${t.timestamp.split('T')[1].split('.')[0]}</span>
+                        <p class="text-amber-200 mt-1">${t.error}</p>
+                    </div>`;
                     return;
                 }
+
+                validTradesCount++;
+                const isRunning = t.status === 'running';
+                const profit = parseFloat(t.profit || 0);
+                const statusClass = isRunning ? 'running' : (profit > 0 ? 'win' : 'loss');
                 
-                const trades = Object.entries(data.trades)
-                    .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
-                
-                const tradesHtml = trades.map(([id, trade]) => {
-                    const profit = trade.profit || 0;
-                    const status = trade.status || 'unknown';
-                    
-                    let statusBadge = '';
-                    let resultClass = '';
-                    let resultText = '';
-                    
-                    if (status === 'running') {
-                        statusBadge = '<span class="badge badge-info status-running">RUNNING</span>';
-                        resultClass = 'running';
-                        resultText = 'RUNNING';
-                    } else if (status === 'pending') {
-                        statusBadge = '<span class="badge badge-warning">PENDING</span>';
-                        resultClass = 'neutral';
-                        resultText = 'PENDING';
-                    } else {
-                        statusBadge = '<span class="badge badge-success">COMPLETED</span>';
-                        resultClass = profit > 0 ? 'win' : 'loss';
-                        resultText = profit > 0 ? 'WIN' : 'LOSS';
-                    }
-                    
-                    const switches = trade.growth_rate_switches || 0;
-                    const switchBadge = switches > 0 ? 
-                        `<span class="metric-highlight">${switches}</span>` : '0';
-                    
-                    return `
-                        <tr>
-                            <td>${statusBadge}</td>
-                            <td style="font-size: 11px;">${new Date(trade.timestamp).toLocaleString()}</td>
-                            <td style="font-family: monospace; font-size: 11px;">${id.substring(0, 8)}...</td>
-                            <td><span class="metric-highlight">${(trade.pre_trade_volatility || 0).toFixed(3)}%</span></td>
-                            <td><span class="badge badge-info">${trade.volatility_trend || 'N/A'}</span></td>
-                            <td>${trade.volatility_at_exit ? `<span class="metric-highlight">${trade.volatility_at_exit.toFixed(3)}%</span>` : 'N/A'}</td>
-                            <td><strong>${((trade.growth_rate || 0) * 100).toFixed(2)}%</strong></td>
-                            <td>${switchBadge}</td>
-                            <td>${trade.ticks_completed || '0'}/${trade.target_ticks || 'N/A'}</td>
-                            <td>${trade.duration_seconds ? trade.duration_seconds.toFixed(1) + 's' : 'N/A'}</td>
-                            <td><span class="badge badge-info">${(trade.exit_reason || 'N/A').replace(/_/g, ' ')}</span></td>
-                            <td class="positive">${(trade.max_profit_reached || 0).toFixed(2)}</td>
-                            <td class="${resultClass}"><strong>${status === 'completed' ? profit.toFixed(2) : 'N/A'}</strong></td>
-                            <td><span class="badge ${profit > 0 ? 'badge-success' : 'badge-danger'}">${resultText}</span></td>
-                        </tr>
-                    `;
-                }).join('');
-                
-                document.getElementById('tradesBody').innerHTML = tradesHtml;
-            } catch (error) {
-                console.error('Error loading data:', error);
-            }
+                tbody.innerHTML += `
+                    <tr class="hover:bg-slate-800/20 transition">
+                        <td class="px-6 py-4 text-slate-500 text-xs">${t.timestamp.split('T')[1].split('.')[0]}</td>
+                        <td class="px-6 py-4 font-medium">${t.parameters?.symbol || 'R_100'}</td>
+                        <td class="px-6 py-4 text-slate-400">${(t.growth_rate * 100).toFixed(1)}%</td>
+                        <td class="px-6 py-4">
+                            <span class="status-badge ${statusClass}">${t.status}</span>
+                        </td>
+                        <td class="px-6 py-4 text-right font-bold ${profit > 0 ? 'text-emerald-500' : 'text-red-500'}">
+                            ${isRunning ? '...' : '$' + profit.toFixed(2)}
+                        </td>
+                    </tr>
+                `;
+            });
+
+            if (skipHtml) skipLog.innerHTML = skipHtml;
+            if (validTradesCount === 0) tbody.innerHTML = '<tr><td colspan="5" class="py-10 text-center text-slate-600">No active or historical trades found.</td></tr>';
         }
-        
-        function exportCSV() {
-            window.location.href = `/trades/export?filter=${currentFilter}`;
+
+        function updateStats(session, trades) {
+            const skipped = trades.filter(t => t.error && t.error.includes("Safety")).length;
+            document.getElementById('stat-total').innerText = session.trades_count || 0;
+            document.getElementById('stat-skipped').innerText = skipped;
+            document.getElementById('session-pl').innerText = `$${parseFloat(session.total_profit_loss || 0).toFixed(2)}`;
+            document.getElementById('session-pl').className = `text-2xl font-bold ${session.total_profit_loss >= 0 ? 'text-emerald-500' : 'text-red-500'}`;
+            
+            const wins = trades.filter(t => t.profit > 0).length;
+            const rate = session.trades_count > 0 ? Math.round((wins / session.trades_count) * 100) : 0;
+            document.getElementById('stat-winrate').innerText = rate + '%';
         }
-        
-        async function showOptimalConfig() {
-            try {
-                const response = await fetch('/config/optimal');
-                const data = await response.json();
-                const config = JSON.stringify(data.recommended_setup.parameters, null, 2);
-                const notes = data.recommended_setup.notes.join('\\n');
-                alert(`📋 Aggressive Configuration\\n\\n${config}\\n\\n📝 Key Features & Notes:\\n${notes}`);
-            } catch (error) {
-                alert('Failed to fetch configuration');
-            }
-        }
-        
-        setInterval(() => {
-            countdownTimer--;
-            document.getElementById('countdown').textContent = countdownTimer;
-            if (countdownTimer <= 0) {
-                loadSession();
-                loadData();
-                countdownTimer = 10;
-            }
-        }, 1000);
-        
-        loadSession();
-        loadData();
+
+        setInterval(updateDashboard, 5000);
+        updateDashboard();
     </script>
 </body>
-</html>"""
+</html>
+"""
     return html, 200
 
 if __name__ == '__main__':
@@ -2034,4 +2172,5 @@ if __name__ == '__main__':
     logger.info("  4. ✓ Uses tick data for accurate volatility calculations")
     logger.info("  5. ✓ AGGRESSIVE SAFETY: No fallback if calm conditions aren't met. Trade is skipped.")
     
+    app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False, threaded=True)    
     app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False, threaded=True)
