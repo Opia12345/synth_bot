@@ -403,12 +403,12 @@ class VolatilityAnalyzer:
         mean_price = sum(prices_list[-15:]) / 15
         pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
         
+        # Change this block to allow decreasing trends and slightly more noise
         is_low_vol = (
-            pct_volatility < 0.15 and 
-            trend != "increasing" and
-            cv < 2.5 and 
-            er < 0.5 and
-            micro_stable # MUST be micro-stable (no sudden small jumps)
+            pct_volatility < 0.18 and # Increased from 0.15
+            trend != "increasing" and # Allows 'stable' and 'decreasing'
+            cv < 3.0 and              # Relaxed from 2.5
+            er < 0.6                  # Relaxed from 0.5
         )
         
         return is_low_vol, pct_volatility, trend
@@ -447,7 +447,7 @@ class EnhancedSafetyChecks:
         
         return is_safe, reason, max_volatility
 
-    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=20):
+    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=10):
         if not self.pre_trade_volatility_check:
             trade_logger.info("⚠️ Pre-trade volatility check DISABLED")
             return True, 0, "disabled", "Check disabled"
@@ -881,8 +881,8 @@ class EnhancedSafetyChecks:
             is_micro_ok = self.volatility_analyzer.is_micro_stable(final_prices, lookback=5)
             final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-10:])
 
-            # Inside place_accumulator_trade Step 3:
-            if final_vol > pre_vol * 1.15 or final_vel > 0.015: # Relaxed multipliers/limits
+            # Relax the final split-second "abort" multiplier
+            if final_vol > pre_vol * 1.40 or final_vel > 0.018: # Relaxed from 1.15 / 0.015
                 trade_logger.error("🚫 ABORTING: Significant instability...")
             
             # Final safety check for selected growth rate
@@ -1447,7 +1447,7 @@ class DerivAccumulatorBot:
             trade_logger.error(f"Tick volatility analysis failed: {e}")
         return None, None
 
-    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=20):
+    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=10):
         if not self.pre_trade_volatility_check:
             trade_logger.info("⚠️ Pre-trade volatility check DISABLED")
             return True, 0, "disabled", "Check disabled"
@@ -1455,13 +1455,11 @@ class DerivAccumulatorBot:
         trade_logger.info(f"🔍 AGGRESSIVE SAFETY: Monitoring market for CALM window (max {max_wait_time}s)")
         
         start_time = datetime.now()
-        attempts = 0
         consecutive_safe_readings = 0
-        required_safe_readings = 3  # Require 5 consecutive safe readings (up from 3)
+        required_safe_readings = 3 
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
-            attempts += 1
-            volatility, prices = await self.analyze_tick_volatility(periods=100) # More data (100 ticks)
+            volatility, prices = await self.analyze_tick_volatility(periods=100)
             
             if volatility is None:
                 consecutive_safe_readings = 0
@@ -1473,33 +1471,38 @@ class DerivAccumulatorBot:
                 threshold=self.max_entry_volatility
             )
             
+            # --- FIX: Define variables BEFORE they are used in is_safe_entry ---
+            avg_velocity, avg_acceleration = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-20:])
+            
             test_growth_rates = [0.05, 0.03, 0.02]
             safe_rates = [r for r in test_growth_rates if EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, r)[0]]
             
             is_safe_entry = (
                 is_low_vol and 
-                trend == "stable" and # MUST be stable, not just "not increasing"
-                len(safe_rates) == len(test_growth_rates) and # Must be safe for ALL test rates
-                pct_vol < (self.max_entry_volatility * 0.8) # 20% safety buffer
+                trend in ["stable", "decreasing"] and # FIX: Included 'decreasing'
+                len(safe_rates) == len(test_growth_rates) and 
+                pct_vol < self.max_entry_volatility and  
+                avg_velocity < 0.015                  # FIX: Relaxed from 0.010 to 0.015
             )
+            # -----------------------------------------------------------------
             
             if is_safe_entry:
                 consecutive_safe_readings += 1
-                trade_logger.info(f"✓ CALM reading {consecutive_safe_readings}/{required_safe_readings}")
+                trade_logger.info(f"✓ CALM reading {consecutive_safe_readings}/{required_safe_readings} | Velocity: {avg_velocity:.6f}")
                 if consecutive_safe_readings >= required_safe_readings:
                     self.pre_trade_volatility = pct_vol
                     self.volatility_trend = trend
                     return True, pct_vol, trend, "Market confirmed calm"
             else:
                 if consecutive_safe_readings > 0:
-                    trade_logger.warning("❌ Market noise detected - Resetting safety timer")
+                    rejection_reason = "Noise" if not is_low_vol else "Trend" if trend not in ["stable", "decreasing"] else "Velocity"
+                    trade_logger.warning(f"❌ Market {rejection_reason} detected - Resetting safety timer")
                 consecutive_safe_readings = 0
             
             await asyncio.sleep(check_interval)
         
         trade_logger.error("🚫 SKIP TRADE: Market too volatile or noisy. Conditions not met.")
         return False, None, None, "Market conditions unsuitable"
-
     def calculate_realtime_volatility(self):
         """Calculate real-time volatility from tick data"""
         if len(self.price_history) < 5:
