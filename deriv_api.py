@@ -285,7 +285,7 @@ def trade_completed():
 
 
 class VolatilityAnalyzer:
-    """Advanced volatility analysis using mathematical calculations on tick data"""
+    """Advanced volatility analysis using aggressive mathematical filtering"""
     
     @staticmethod
     def calculate_standard_deviation(values):
@@ -322,7 +322,15 @@ class VolatilityAnalyzer:
             return sum(true_ranges) / len(true_ranges) if true_ranges else 0
         
         return sum(true_ranges[-period:]) / period
-    
+
+    @staticmethod
+    def calculate_efficiency_ratio(prices, period=10):
+        if len(prices) < period:
+            return 0
+        net_change = abs(prices[-1] - prices[-period])
+        volatility = sum(abs(prices[i] - prices[i-1]) for i in range(len(prices)-period+1, len(prices)))
+        return net_change / volatility if volatility > 0 else 0
+
     @staticmethod
     def detect_volatility_trend(prices, short_window=5, long_window=15):
         """Detect if volatility is increasing, decreasing, or stable"""
@@ -345,28 +353,24 @@ class VolatilityAnalyzer:
             return "stable"
     
     @staticmethod
-    def is_low_volatility_window(prices, threshold=0.15):
-        """Check if current volatility is in a low/stable window - safe for entry"""
-        if len(prices) < 10:
+    def is_low_volatility_window(prices, threshold=0.10):
+        if len(prices) < 20:
             return False, 0, "insufficient_data"
         
-        # Calculate multiple volatility metrics
-        std_dev = VolatilityAnalyzer.calculate_standard_deviation(list(prices)[-10:])
-        cv = VolatilityAnalyzer.calculate_coefficient_of_variation(list(prices)[-10:])
+        prices_list = list(prices)
+        std_dev = VolatilityAnalyzer.calculate_standard_deviation(prices_list[-15:])
+        cv = VolatilityAnalyzer.calculate_coefficient_of_variation(prices_list[-15:])
         trend = VolatilityAnalyzer.detect_volatility_trend(prices)
+        er = VolatilityAnalyzer.calculate_efficiency_ratio(prices_list)
         
-        # Calculate percentage-based volatility
-        mean_price = sum(list(prices)[-10:]) / 10
+        mean_price = sum(prices_list[-15:]) / 15
         pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
         
-        # Low volatility criteria:
-        # 1. Percentage volatility below threshold
-        # 2. Trend is not increasing
-        # 3. Coefficient of variation is reasonable
         is_low_vol = (
             pct_volatility < threshold and 
-            trend != "increasing" and 
-            cv < 2.0
+            trend == "stable" and # MUST be stable, not just "not increasing"
+            cv < 1.5 and # Lower CV threshold
+            er < 0.3 # ER < 0.3 indicates a non-trending, choppy/calm market
         )
         
         return is_low_vol, pct_volatility, trend
@@ -374,31 +378,23 @@ class VolatilityAnalyzer:
 
 class EnhancedSafetyChecks:
     """
-    Comprehensive safety checks to prevent forced trades
-    Only enter trades when volatility is genuinely low and safe
+    Strict safety verification to prevent forced entries
     """
     
     @staticmethod
     def is_volatility_safe_for_growth_rate(volatility_pct, growth_rate):
-        """
-        Verify that current volatility is safe for the proposed growth rate
-        Higher growth rates require LOWER volatility
-        
-        Returns: (is_safe, reason, max_allowed_volatility)
-        """
-        # Define strict volatility thresholds for each growth rate tier
         safety_matrix = {
-            0.05: 0.08,   # 5% growth needs < 0.08% volatility (VERY LOW)
-            0.04: 0.10,   # 4% growth needs < 0.10% volatility (LOW)
-            0.03: 0.12,   # 3% growth needs < 0.12% volatility (MODERATE-LOW)
-            0.025: 0.15,  # 2.5% growth needs < 0.15% volatility (MODERATE)
-            0.02: 0.18,   # 2% growth needs < 0.18% volatility (MODERATE-HIGH)
-            0.015: 0.25,  # 1.5% growth needs < 0.25% volatility (HIGH)
-            0.01: 0.35    # 1% growth needs < 0.35% volatility (VERY HIGH)
+            0.05: 0.05,   # 5% growth now needs < 0.05% vol
+            0.04: 0.07,   # 4% growth now needs < 0.07% vol
+            0.03: 0.09,
+            0.025: 0.11,
+            0.02: 0.13,
+            0.015: 0.18,
+            0.01: 0.25
         }
         
         # Find the appropriate threshold for this growth rate
-        max_volatility = 0.35  # Default fallback
+        max_volatility = 0.25  # Default fallback
         for rate_threshold, vol_threshold in sorted(safety_matrix.items(), reverse=True):
             if growth_rate >= rate_threshold:
                 max_volatility = vol_threshold
@@ -465,7 +461,7 @@ class DerivAccumulatorBot:
         self.contract_type = "ACCU"
         
         # Extended price history for better analysis
-        self.price_history = deque(maxlen=50)
+        self.price_history = deque(maxlen=100) # Increased history size for analysis
         self.trade_start_time = None
         self.entry_spot = None
         self.exit_spot = None
@@ -592,145 +588,58 @@ class DerivAccumulatorBot:
             trade_logger.error(f"Tick volatility analysis failed: {e}")
         return None, None
 
-    async def wait_for_low_volatility_window(self, max_wait_time=600, check_interval=15):
-        """
-        ENHANCED SAFETY VERSION
-        
-        Key improvements:
-        1. NO TIMEOUT FALLBACK - If we don't find safe conditions, we DON'T trade
-        2. Checks volatility safety for MULTIPLE growth rates
-        3. Requires SUSTAINED low volatility (not just one reading)
-        4. More conservative thresholds
-        
-        Returns: (can_trade, volatility, trend, reason)
-        """
+    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=20):
         if not self.pre_trade_volatility_check:
-            trade_logger.info("⚠️ Pre-trade volatility check DISABLED - proceeding without checks")
-            return True, 0, "disabled", "Check disabled by configuration"
+            trade_logger.info("⚠️ Pre-trade volatility check DISABLED")
+            return True, 0, "disabled", "Check disabled"
         
-        trade_logger.info(f"🔍 STRICT SAFETY CHECK: Waiting for LOW volatility window (timeout: {max_wait_time}s)")
-        trade_logger.info(f"⚠️ Will NOT trade if safe conditions aren't found within {max_wait_time}s")
+        trade_logger.info(f"🔍 AGGRESSIVE SAFETY: Monitoring market for CALM window (max {max_wait_time}s)")
         
         start_time = datetime.now()
         attempts = 0
         consecutive_safe_readings = 0
-        required_safe_readings = 3  # Require 3 consecutive safe readings
-        
-        best_volatility = None
-        best_trend = None
+        required_safe_readings = 5  # Require 5 consecutive safe readings (up from 3)
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
             attempts += 1
-            elapsed = (datetime.now() - start_time).total_seconds()
-            
-            # Get recent tick data with extended history for better analysis
-            volatility, prices = await self.analyze_tick_volatility(periods=50)
+            volatility, prices = await self.analyze_tick_volatility(periods=100) # More data (100 ticks)
             
             if volatility is None:
-                trade_logger.warning(f"❌ Attempt {attempts} ({elapsed:.0f}s): Failed to get volatility data")
                 consecutive_safe_readings = 0
                 await asyncio.sleep(check_interval)
                 continue
             
-            # Track best readings seen
-            if best_volatility is None or volatility < best_volatility:
-                best_volatility = volatility
-            
-            # Enhanced volatility window check with stricter thresholds
             is_low_vol, pct_vol, trend = self.volatility_analyzer.is_low_volatility_window(
                 self.price_history, 
                 threshold=self.max_entry_volatility
             )
             
-            best_trend = trend
+            test_growth_rates = [0.05, 0.03, 0.02]
+            safe_rates = [r for r in test_growth_rates if EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, r)[0]]
             
-            # CRITICAL: Test if volatility is safe for MULTIPLE growth rates
-            # We want conditions that work for at least moderate growth rates
-            test_growth_rates = [0.05, 0.04, 0.03, 0.025, 0.02]
-            compatible_rates = []
-            
-            for test_rate in test_growth_rates:
-                is_safe, reason, max_vol = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
-                    pct_vol, test_rate
-                )
-                if is_safe:
-                    compatible_rates.append(test_rate)
-            
-            trade_logger.info(
-                f"📊 Attempt {attempts} ({elapsed:.0f}s): "
-                f"Vol={pct_vol:.4f}%, Trend={trend}, LowVol={is_low_vol}, "
-                f"CompatibleRates={len(compatible_rates)}/{len(test_growth_rates)}"
-            )
-            
-            # Strict entry criteria:
-            # 1. Must be in low volatility window
-            # 2. Trend must not be "increasing"
-            # 3. Must be compatible with at least 3 growth rate tiers
-            # 4. Volatility must be below our max threshold
             is_safe_entry = (
                 is_low_vol and 
-                trend != "increasing" and 
-                len(compatible_rates) >= 3 and
-                pct_vol < self.max_entry_volatility
+                trend == "stable" and # MUST be stable, not just "not increasing"
+                len(safe_rates) == len(test_growth_rates) and # Must be safe for ALL test rates
+                pct_vol < (self.max_entry_volatility * 0.8) # 20% safety buffer
             )
             
             if is_safe_entry:
                 consecutive_safe_readings += 1
-                trade_logger.info(
-                    f"✓ SAFE reading {consecutive_safe_readings}/{required_safe_readings}: "
-                    f"Vol={pct_vol:.4f}%, Trend={trend}, Compatible with {len(compatible_rates)} rates"
-                )
-                
+                trade_logger.info(f"✓ CALM reading {consecutive_safe_readings}/{required_safe_readings}")
                 if consecutive_safe_readings >= required_safe_readings:
                     self.pre_trade_volatility = pct_vol
                     self.volatility_trend = trend
-                    
-                    trade_logger.info("=" * 80)
-                    trade_logger.info(f"✅ CONFIRMED SAFE ENTRY WINDOW DETECTED!")
-                    trade_logger.info(f"   Volatility: {pct_vol:.4f}% (threshold: {self.max_entry_volatility:.4f}%)")
-                    trade_logger.info(f"   Trend: {trend}")
-                    trade_logger.info(f"   Compatible with {len(compatible_rates)}/{len(test_growth_rates)} growth rates")
-                    trade_logger.info(f"   Consecutive safe readings: {consecutive_safe_readings}")
-                    trade_logger.info(f"   Time taken: {elapsed:.1f}s")
-                    trade_logger.info("=" * 80)
-                    
-                    return True, pct_vol, trend, f"Safe entry confirmed after {attempts} checks"
+                    return True, pct_vol, trend, "Market confirmed calm"
             else:
-                # Reset counter if we get an unsafe reading
                 if consecutive_safe_readings > 0:
-                    trade_logger.warning(
-                        f"⚠️ Safe streak broken at {consecutive_safe_readings}/{required_safe_readings}. "
-                        f"Reason: Vol={pct_vol:.4f}%, Trend={trend}, LowVol={is_low_vol}"
-                    )
+                    trade_logger.warning("❌ Market noise detected - Resetting safety timer")
                 consecutive_safe_readings = 0
-                
-                # Provide detailed rejection reason
-                rejection_reasons = []
-                if not is_low_vol:
-                    rejection_reasons.append(f"Volatility too high ({pct_vol:.4f}% > {self.max_entry_volatility:.4f}%)")
-                if trend == "increasing":
-                    rejection_reasons.append("Volatility trend is increasing")
-                if len(compatible_rates) < 3:
-                    rejection_reasons.append(f"Only compatible with {len(compatible_rates)}/5 growth rates")
-                
-                trade_logger.info(f"✗ Unsafe: {', '.join(rejection_reasons)}")
             
             await asyncio.sleep(check_interval)
         
-        # CRITICAL: NO FALLBACK - Reject trade if we didn't find safe conditions
-        elapsed_total = (datetime.now() - start_time).total_seconds()
-        
-        trade_logger.error("=" * 80)
-        trade_logger.error(f"❌ TRADE REJECTED: No safe entry window found")
-        trade_logger.error(f"   Time elapsed: {elapsed_total:.1f}s / {max_wait_time}s")
-        trade_logger.error(f"   Total attempts: {attempts}")
-        trade_logger.error(f"   Best volatility seen: {best_volatility:.4f}% (threshold: {self.max_entry_volatility:.4f}%)")
-        trade_logger.error(f"   Best trend: {best_trend}")
-        trade_logger.error(f"   Consecutive safe readings achieved: {consecutive_safe_readings}/{required_safe_readings}")
-        trade_logger.error(f"   ⚠️ NOT FORCING TRADE - Market conditions not suitable")
-        trade_logger.error("=" * 80)
-        
-        return False, best_volatility, best_trend, f"Timeout - no safe conditions after {attempts} attempts"
+        trade_logger.error("🚫 SKIP TRADE: Market too volatile or noisy. Conditions not met.")
+        return False, None, None, "Market conditions unsuitable"
 
     def calculate_realtime_volatility(self):
         """Calculate real-time volatility from tick data"""
@@ -747,22 +656,22 @@ class DerivAccumulatorBot:
     def select_growth_rate_for_volatility(self, volatility):
         """Select optimal growth rate based on current volatility"""
         # More aggressive thresholds for faster adaptation
-        if volatility < 0.08:
+        if volatility < 0.05:
             rate = 0.05
             tier = "Very Low"
-        elif volatility < 0.12:
+        elif volatility < 0.07:
             rate = 0.04
             tier = "Low"
-        elif volatility < 0.16:
+        elif volatility < 0.09:
             rate = 0.03
             tier = "Moderate-Low"
-        elif volatility < 0.20:
+        elif volatility < 0.11:
             rate = 0.025
             tier = "Moderate"
-        elif volatility < 0.30:
+        elif volatility < 0.13:
             rate = 0.02
             tier = "Moderate-High"
-        elif volatility < 0.50:
+        elif volatility < 0.18:
             rate = 0.015
             tier = "High"
         else:
@@ -1077,14 +986,14 @@ class DerivAccumulatorBot:
                     return None, "Symbol validation failed"
             
             # STEP 1: Wait for safe volatility window
-            trade_logger.info("🔍 STEP 1/3: Checking for safe volatility window...")
+            trade_logger.info("🔍 STEP 1/3: Multi-reading calm check...")
             can_enter, pre_vol, trend, reason = await self.wait_for_low_volatility_window()
             
             if not can_enter:
-                trade_logger.error(f"❌ TRADE REJECTED IN STEP 1: {reason}")
-                return None, f"Volatility check failed: {reason}"
+                trade_logger.error(f"🚫 ABORTING: {reason}")
+                return None, f"Safety check failed: {reason}"
             
-            trade_logger.info(f"✅ STEP 1 PASSED: Safe volatility window confirmed")
+            trade_logger.info(f"✅ STEP 1 PASSED: Calm window confirmed")
             
             # STEP 2: Select safe growth rate
             trade_logger.info("🔍 STEP 2/3: Selecting and verifying growth rate...")
@@ -1111,21 +1020,13 @@ class DerivAccumulatorBot:
             
             trade_logger.info(f"✅ STEP 2 PASSED: Growth rate {self.current_growth_rate*100:.2f}% verified safe")
             
-            # STEP 3: Final volatility re-check before placing trade
-            trade_logger.info("🔍 STEP 3/3: Final volatility verification before trade placement...")
-            final_vol, _ = await self.analyze_tick_volatility(periods=20)
+            # STEP 3: Final volatility re-check
+            trade_logger.info("🔍 STEP 3/3: Final split-second safety check...")
+            final_vol, _ = await self.analyze_tick_volatility(periods=30)
             
-            if final_vol is None:
-                trade_logger.error(f"❌ TRADE REJECTED IN STEP 3: Cannot get final volatility reading")
-                return None, "Cannot verify final volatility"
-            
-            # Verify volatility hasn't spiked since we started
-            if final_vol > self.max_entry_volatility * 1.1:  # Allow 10% tolerance
-                trade_logger.error(
-                    f"❌ TRADE REJECTED IN STEP 3: Volatility spiked during setup! "
-                    f"{final_vol:.4f}% > {self.max_entry_volatility:.4f}%"
-                )
-                return None, f"Volatility spike detected: {final_vol:.4f}%"
+            if final_vol is None or final_vol > pre_vol * 1.05:
+                trade_logger.error("🚫 ABORTING: Micro-spike detected during setup")
+                return None, "Micro-spike detected"
             
             # Final safety check for selected growth rate
             is_final_safe, final_reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
@@ -1766,9 +1667,10 @@ def health_check():
             "✓ Comprehensive analytics with growth rate switches tracking"
         ],
         "improvements": [
-            "1. Checks for LOW volatility before trade entry",
-            "2. Monitors and switches growth rates during trade",
-            "3. Uses tick data for accurate volatility calculations"
+            "1. Waits for CALM market conditions (< 0.10% Vol, Stable Trend, Low ER/CV) before entry",
+            "2. Monitors and switches growth rates during trade based on volatility",
+            "3. Uses tick data for accurate volatility calculations",
+            "4. Aggressive safety checks with no fallback"
         ],
         "logging_enabled": True,
         "log_location": LOG_DIR
@@ -1779,7 +1681,7 @@ def health_check():
 def get_optimal_config():
     return jsonify({
         "recommended_setup": {
-            "description": "Enhanced setup with pre-trade volatility checks and dynamic growth rate switching",
+            "description": "Aggressive setup with stringent pre-trade volatility and calm market checks, dynamic growth rate switching, and tick-based analysis",
             "parameters": {
                 "stake": 5.0,
                 "symbol": "1HZ10V",
@@ -1793,34 +1695,32 @@ def get_optimal_config():
                 "volatility_check_interval": 1,
                 "volatility_exit_threshold": 1.5,
                 "pre_trade_volatility_check": True,
-                "max_entry_volatility": 0.15,
+                "max_entry_volatility": 0.10, # Tighter threshold
                 "enable_growth_rate_switching": True,
                 "growth_rate_switch_interval": 3
             },
             "notes": [
-                "✓ Waits for LOW volatility (< 0.15%) before entering trade",
-                "✓ Dynamically switches growth rates every 3 ticks based on current volatility",
-                "✓ Uses mathematical calculations on tick data for accuracy",
-                "✓ Exits immediately on volatility spikes (1.5x threshold)",
-                "✓ Adaptive mode automatically selects 1-5% growth rate"
+                "✓ WAITS FOR CALM MARKET: Entry only when Vol < 0.10%, Trend=Stable, ER < 0.3, CV < 1.5",
+                "✓ REQUIRES 5 CONSECUTIVE CALM READINGS before trade",
+                "✓ DYNAMIC SWITCHING: Adjusts growth rate every 3 ticks based on real-time volatility",
+                "✓ AGGRESSIVE SAFETY: No fallback if calm conditions aren't met. Trade is skipped.",
+                "✓ VOLATILITY SPIKE EXIT: Exits on 1.5x volatility increase during trade",
+                "✓ ZERO TOLERANCE: Aborts trade on micro-spikes during setup",
+                "✓ ADAPTIVE MODE: Automatically selects 1-5% growth rate based on volatility"
             ]
         },
         "new_parameters": {
-            "pre_trade_volatility_check": {
-                "default": True,
-                "description": "Wait for low volatility window before entering trade"
-            },
             "max_entry_volatility": {
-                "default": 0.15,
-                "description": "Maximum volatility percentage allowed for trade entry (0.15 = 0.15%)"
-            },
-            "enable_growth_rate_switching": {
-                "default": True,
-                "description": "Enable dynamic growth rate switching during trade based on volatility"
+                "default": 0.10,
+                "description": "Maximum volatility percentage allowed for trade entry (0.10 = 0.10%). Tighter for aggressive filtering."
             },
             "growth_rate_switch_interval": {
                 "default": 3,
-                "description": "Check and potentially switch growth rate every N ticks"
+                "description": "Check and potentially switch growth rate every N ticks."
+            },
+             "pre_trade_volatility_check": {
+                "default": True,
+                "description": "Must find a CALM market window (low volatility, stable trend, low ER/CV) before trade entry. If not found within timeout, trade is skipped."
             }
         },
         "usage": "POST /trade/<app_id>/<api_token> with JSON body containing these parameters"
@@ -1886,9 +1786,9 @@ def dashboard():
     <div class="container">
         <div class="header">
             <h1>🚀 Enhanced Trading Dashboard v4.0</h1>
-            <p>Real-time monitoring with pre-trade volatility checks, dynamic growth rate switching & tick-based analysis</p>
+            <p>Aggressive market filtering with pre-trade CALM market detection, dynamic growth rate switching & tick-based analysis</p>
             <div style="margin-top: 15px;">
-                <span class="feature-badge">✓ Pre-Trade Vol Check</span>
+                <span class="feature-badge">✓ CALM Market Entry</span>
                 <span class="feature-badge">✓ Dynamic Growth Switching</span>
                 <span class="feature-badge">✓ Tick-Based Analysis</span>
             </div>
@@ -1926,9 +1826,9 @@ def dashboard():
                             <th>Status</th>
                             <th>Timestamp</th>
                             <th>Trade ID</th>
-                            <th>Pre-Vol</th>
+                            <th>Pre-Vol %</th>
                             <th>Trend</th>
-                            <th>Exit Vol</th>
+                            <th>Exit Vol %</th>
                             <th>Growth %</th>
                             <th>Switches</th>
                             <th>Ticks</th>
@@ -2093,7 +1993,7 @@ def dashboard():
                 const data = await response.json();
                 const config = JSON.stringify(data.recommended_setup.parameters, null, 2);
                 const notes = data.recommended_setup.notes.join('\\n');
-                alert(`📋 Enhanced Configuration\\n\\n${config}\\n\\n📝 New Features:\\n${notes}`);
+                alert(`📋 Aggressive Configuration\\n\\n${config}\\n\\n📝 Key Features & Notes:\\n${notes}`);
             } catch (error) {
                 alert('Failed to fetch configuration');
             }
@@ -2118,8 +2018,8 @@ def dashboard():
 
 if __name__ == '__main__':
     logger.info("=" * 60)
-    logger.info("Starting Deriv Accumulator Trading Bot v4.0 - ENHANCED")
-    logger.info("With Pre-Trade Volatility Checks & Dynamic Growth Switching")
+    logger.info("Starting Deriv Accumulator Trading Bot v4.0 - AGGRESSIVE")
+    logger.info("With CALM Market Entry & Dynamic Growth Switching")
     logger.info("=" * 60)
     
     port = int(os.environ.get('PORT', 5000))
@@ -2128,8 +2028,10 @@ if __name__ == '__main__':
     logger.info(f"Database path: {DB_PATH}")
     logger.info(f"Max concurrent trades: {MAX_CONCURRENT_TRADES}")
     logger.info("IMPROVEMENTS:")
-    logger.info("  1. ✓ Pre-trade LOW volatility detection")
-    logger.info("  2. ✓ Dynamic growth rate switching during trades")
-    logger.info("  3. ✓ Mathematical tick-based volatility analysis")
+    logger.info("  1. ✓ Waits for CALM market conditions (< 0.10% Vol, Stable Trend, Low ER/CV) before entry")
+    logger.info("  2. ✓ REQUIRES 5 CONSECUTIVE CALM READINGS")
+    logger.info("  3. ✓ Monitors and switches growth rates during trade based on volatility")
+    logger.info("  4. ✓ Uses tick data for accurate volatility calculations")
+    logger.info("  5. ✓ AGGRESSIVE SAFETY: No fallback if calm conditions aren't met. Trade is skipped.")
     
     app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False, threaded=True)
