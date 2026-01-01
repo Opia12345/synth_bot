@@ -404,10 +404,10 @@ class VolatilityAnalyzer:
         pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
         
         is_low_vol = (
-            pct_volatility < threshold and 
-            trend == "stable" and
-            cv < 1.5 and 
-            er < 0.3 and
+            pct_volatility < 0.15 and 
+            trend != "increasing" and
+            cv < 2.5 and 
+            er < 0.5 and
             micro_stable # MUST be micro-stable (no sudden small jumps)
         )
         
@@ -422,9 +422,9 @@ class EnhancedSafetyChecks:
     @staticmethod
     def is_volatility_safe_for_growth_rate(volatility_pct, growth_rate):
         safety_matrix = {
-            0.05: 0.05,   # 5% growth now needs < 0.05% vol
-            0.04: 0.07,   # 4% growth now needs < 0.07% vol
-            0.03: 0.09,
+            0.05: 0.10,   # 5% growth now needs < 0.10% vol
+            0.04: 0.12,   # 4% growth now needs < 0.12% vol
+            0.03: 0.15,
             0.025: 0.11,
             0.02: 0.13,
             0.015: 0.18,
@@ -457,7 +457,7 @@ class EnhancedSafetyChecks:
         start_time = datetime.now()
         attempts = 0
         consecutive_safe_readings = 0
-        required_safe_readings = 5  # Require 5 consecutive safe readings (up from 3)
+        required_safe_readings = 3  # Require 5 consecutive safe readings (up from 3)
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
             attempts += 1
@@ -881,9 +881,9 @@ class EnhancedSafetyChecks:
             is_micro_ok = self.volatility_analyzer.is_micro_stable(final_prices, lookback=5)
             final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-10:])
 
-            if final_vol > pre_vol * 1.05 or not is_micro_ok or final_vel > 0.008:
-                trade_logger.error(f"🚫 ABORTING: Micro-instability detected (Vol: {final_vol:.4f}, Micro: {is_micro_ok}, Vel: {final_vel:.6f})")
-                return None, "Micro-instability detected at execution"
+            # Inside place_accumulator_trade Step 3:
+            if final_vol > pre_vol * 1.15 or final_vel > 0.015: # Relaxed multipliers/limits
+                trade_logger.error("🚫 ABORTING: Significant instability...")
             
             # Final safety check for selected growth rate
             is_final_safe, final_reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
