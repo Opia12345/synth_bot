@@ -614,6 +614,12 @@ class DerivAccumulatorBot:
             # Get fresh data
             volatility, prices = await self.analyze_tick_volatility(periods=15)
             
+            # If we don't have enough ticks OR volatility is extremely high (above 0.55%), abort immediately
+            history_len = len(self.price_history) if hasattr(self, 'price_history') else 0
+            if history_len < 5:
+                trade_logger.warning(f"❌ ABORT: Insufficient data ({history_len} ticks). Stopping trade sequence.")
+                return False, None, None, "Insufficient tick data for safety"
+
             if volatility is None:
                 await asyncio.sleep(check_interval)
                 continue
@@ -626,6 +632,10 @@ class DerivAccumulatorBot:
             
             # Check if it's safe for AT LEAST 1% growth (the minimum fallback)
             is_safe_min, _, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, 0.01)
+            
+            if pct_vol > 0.60:
+                trade_logger.warning(f"❌ ABORT: Extreme volatility detected ({pct_vol:.4f}%). Releasing trade slot.")
+                return False, pct_vol, trend, "Extreme volatility abort"
             
             # Calculate recent velocity
             avg_velocity, _ = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-10:])
@@ -1806,7 +1816,7 @@ if __name__ == '__main__':
     logger.info("")
     logger.info("SAFETY PRESERVED:")
     logger.info("  🛡️ STRICT spike abort during final setup check")
-    logger.info("  🛡️ Aborts if vol jumps >40% or velocity >0.020 before entry")
+    logger.info("  🛡️ Aborts if vol jumped >40% or velocity >0.020 before entry")
     logger.info("  🛡️ Real-time volatility monitoring during trade")
     logger.info("")
     
