@@ -600,44 +600,46 @@ class DerivAccumulatorBot:
         return None, None
 
     async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=1):
-        """ULTRA-FAST VERSION: Single 5% Growth Rate Check only"""
+        """ULTRA-FAST SNAPSHOT: Moves to Step 2 after a single safe 15-tick check"""
         if not self.pre_trade_volatility_check:
             return True, 0, "disabled", "Check disabled"
         
-        trade_logger.info(f"🔍 FAST MODE: Checking 5% growth safety (max {max_wait_time}s)")
+        trade_logger.info(f"🔍 FAST SCAN: Monitoring 5% growth safety (Target: <0.22% vol)")
         start_time = datetime.now()
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
-            # Step A: Snap 15-tick analysis (much faster than 50 or 100 ticks)
+            # Reduced from 100/50 ticks to 15 for near-instant API response
             volatility, prices = await self.analyze_tick_volatility(periods=15)
             
             if volatility is None:
                 await asyncio.sleep(check_interval)
                 continue
             
-            # Step B: Get current market metrics
+            # Determine if current volatility supports a 5% Growth Rate
+            # Threshold relaxed slightly to 0.30 to catch calm windows faster
             is_low_vol, pct_vol, trend = self.volatility_analyzer.is_low_volatility_window(
                 self.price_history, 
-                threshold=0.30  # Relaxed threshold for faster triggers
+                threshold=0.30 
             )
             
-            # Step C: ONLY CHECK 5% GROWTH RATE (Strict Requirement)
-            is_safe_5pct, reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, 0.05)
+            # STRICT REQUIREMENT: Must be safe for 0.05 (5%) Growth Rate
+            is_safe_5pct, _, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, 0.05)
             
-            # Step D: Combined Fast-Entry Logic
-            # Relaxed velocity check to avoid hanging on minor noise
+            # Calculate recent velocity to ensure there's no active "jumpiness"
             avg_velocity, _ = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-10:])
             
+            # FAST ENTRY: Proceeds to Step 2 on the very first "Safe" signal
             if is_safe_5pct and trend != "increasing" and avg_velocity < 0.025:
-                trade_logger.info(f"🚀 ENTRY APPROVED | Vol: {pct_vol:.4f}% | Velocity: {avg_velocity:.6f}")
+                trade_logger.info(f"🚀 SNAPSHOT APPROVED: Vol {pct_vol:.4f}% | Entering Step 2...")
                 self.pre_trade_volatility = pct_vol
                 self.volatility_trend = trend
-                return True, pct_vol, trend, "Fast entry approved"
+                return True, pct_vol, trend, "Fast snapshot approved"
             
+            # Check every 1 second instead of waiting 10 seconds between attempts
             await asyncio.sleep(check_interval)
         
-        return False, None, None, "Timeout"
-        
+        return False, None, None, "Step 1 Timeout"       
+    
     def calculate_realtime_volatility(self):
         """Calculate real-time volatility from tick data"""
         if len(self.price_history) < 5:
