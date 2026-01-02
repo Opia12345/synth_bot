@@ -994,8 +994,8 @@ class DerivAccumulatorBot:
                 final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-15:])
                 trade_logger.info(f"📊 Final check - Vol: {final_vol:.4f}%, Velocity: {final_vel:.6f}")
            
-            vol_spike = final_vol > pre_vol * 1.30  # Tightened from 1.60
-            vel_spike = final_vel > 0.020  # Tightened from 0.035
+            vol_spike = final_vol > pre_vol * 1.4   # From 1.30
+            vel_spike = final_vel > 0.08            # From 0.020 – allows more entries while blocking extremes
            
             trade_logger.info(f"🔍 Spike check - Vol spike: {vol_spike} (final: {final_vol:.4f}% vs pre: {pre_vol:.4f}%), Vel spike: {vel_spike} (vel: {final_vel:.6f})")
            
