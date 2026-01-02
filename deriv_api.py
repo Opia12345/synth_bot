@@ -401,10 +401,10 @@ class EnhancedSafetyChecks:
     def is_volatility_safe_for_growth_rate(volatility_pct, growth_rate):
         """RELAXED safety matrix - more permissive thresholds"""
         safety_matrix = {
-            0.05: 0.20,   # 5% growth allows up to 0.20% vol (was 0.12)
-            0.04: 0.22,   # 4% growth allows up to 0.22% vol (was 0.14)
-            0.03: 0.24,   # 3% growth allows up to 0.24% vol (was 0.16)
-            0.025: 0.26,  # 2.5% growth allows up to 0.26% vol (was 0.11)
+            0.05: 0.22,   # 5% growth allows up to 0.20% vol (was 0.12)
+            0.04: 0.24,   # 4% growth allows up to 0.22% vol (was 0.14)
+            0.03: 0.26,   # 3% growth allows up to 0.24% vol (was 0.16)
+            0.025: 0.28,  # 2.5% growth allows up to 0.26% vol (was 0.11)
             0.02: 0.28,   # 2% growth allows up to 0.28% vol (was 0.18)
             0.015: 0.30,  # 1.5% growth allows up to 0.30% vol (was 0.18)
             0.01: 0.35    # 1% growth allows up to 0.35% vol (was 0.25)
@@ -608,26 +608,24 @@ class DerivAccumulatorBot:
         start_time = datetime.now()
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
-            # Reduced from 25 to 15 ticks for faster API response
+            # Step A: Snap 15-tick analysis (much faster than 50 or 100 ticks)
             volatility, prices = await self.analyze_tick_volatility(periods=15)
             
             if volatility is None:
                 await asyncio.sleep(check_interval)
                 continue
             
-            # PERMISSIVE SETTINGS for immediate entry
+            # Step B: Get current market metrics
             is_low_vol, pct_vol, trend = self.volatility_analyzer.is_low_volatility_window(
                 self.price_history, 
-                threshold=0.30 # Increased threshold for even faster entry
+                threshold=0.30  # Relaxed threshold for faster triggers
             )
             
-            # ONLY CHECK 5% GROWTH RATE (as requested)
-            is_safe_5pct, _, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, 0.05)
+            # Step C: ONLY CHECK 5% GROWTH RATE (Strict Requirement)
+            is_safe_5pct, reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, 0.05)
             
-            # COMBINED FAST-ENTRY LOGIC
-            # 1. Must be safe for 5% growth
-            # 2. Must not be a sharp 'increasing' spike
-            # 3. Velocity check relaxed to 0.025
+            # Step D: Combined Fast-Entry Logic
+            # Relaxed velocity check to avoid hanging on minor noise
             avg_velocity, _ = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-10:])
             
             if is_safe_5pct and trend != "increasing" and avg_velocity < 0.025:
@@ -639,7 +637,7 @@ class DerivAccumulatorBot:
             await asyncio.sleep(check_interval)
         
         return False, None, None, "Timeout"
-
+        
     def calculate_realtime_volatility(self):
         """Calculate real-time volatility from tick data"""
         if len(self.price_history) < 5:
