@@ -975,16 +975,34 @@ class DerivAccumulatorBot:
            
             # STEP 3: Final spike check...
             trade_logger.info("🔍 STEP 3/3: Final spike check...")
-           
+
             # Try to get final volatility, with retry
             final_vol, final_prices = None, None
-            for attempt in range(3):  # Increased retries
+            for attempt in range(5):  # Increased patience
                 final_vol, final_prices = await self.analyze_tick_volatility(periods=15)
                 if final_vol is not None:
                     break
-                if attempt < 2:
-                    trade_logger.warning(f"⚠️ Volatility check retry {attempt+1}/3")
+                if attempt < 4:
+                    trade_logger.warning(f"⚠️ Volatility check retry {attempt+1}/5")
                     await asyncio.sleep(0.5)
+
+            if final_vol is None or final_prices is None or len(final_prices) < 15:
+                trade_logger.warning("⚠️ Could not get final volatility - proceeding with caution using pre-vol")
+                final_vol = pre_vol
+                final_vel = 0.0
+            else:
+                final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-15:])
+                trade_logger.info(f"📊 Final check - Vol: {final_vol:.4f}%, Velocity: {final_vel:.6f}")
+
+            vol_spike = final_vol > pre_vol * 1.5   # Relaxed for 1% growth
+            vel_spike = final_vel > 0.12            # Much more forgiving – safe with wide ranges
+
+            trade_logger.info(f"🔍 Spike check - Vol spike: {vol_spike} (final: {final_vol:.4f}% vs pre: {pre_vol:.4f}%), Vel spike: {vel_spike} (vel: {final_vel:.6f})")
+
+            # CRITICAL: Abort if EITHER condition indicates danger
+            if vol_spike or vel_spike:
+                trade_logger.error(f"🚨 SPIKE ABORT! Vol jumped {pre_vol:.4f}% → {final_vol:.4f}% OR velocity {final_vel:.6f} too high")
+                return None, "Spike detected during setup - trade aborted"
            
             if final_vol is None or final_prices is None or len(final_prices) < 15:  # Increased min
                 trade_logger.warning("⚠️ Could not get final volatility - proceeding with caution using pre-vol")
@@ -994,8 +1012,8 @@ class DerivAccumulatorBot:
                 final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-15:])
                 trade_logger.info(f"📊 Final check - Vol: {final_vol:.4f}%, Velocity: {final_vel:.6f}")
            
-            vol_spike = final_vol > pre_vol * 1.4   # From 1.30
-            vel_spike = final_vel > 0.08            # From 0.020 – allows more entries while blocking extremes
+                vol_spike = final_vol > pre_vol * 1.5   # Allow moderate vol increase
+                vel_spike = final_vel > 0.12            # Relaxed significantly for 1% safety
            
             trade_logger.info(f"🔍 Spike check - Vol spike: {vol_spike} (final: {final_vol:.4f}% vs pre: {pre_vol:.4f}%), Vel spike: {vel_spike} (vel: {final_vel:.6f})")
            
