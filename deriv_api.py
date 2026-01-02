@@ -13,17 +13,14 @@ from collections import deque
 import logging
 from logging.handlers import RotatingFileHandler
 import math
-
 # === LOGGING CONFIGURATION ===
 LOG_DIR = os.environ.get('LOG_DIR', 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(name)-15s | %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
-
 file_handler = RotatingFileHandler(
     os.path.join(LOG_DIR, 'trading_bot.log'),
     maxBytes=10*1024*1024,
@@ -32,31 +29,23 @@ file_handler = RotatingFileHandler(
 file_handler.setFormatter(logging.Formatter(
     '%(asctime)s | %(levelname)-8s | %(name)-15s | %(funcName)-20s | %(message)s'
 ))
-
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(logging.Formatter(
     '%(asctime)s | %(levelname)-8s | %(message)s'
 ))
-
 root_logger = logging.getLogger()
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
-
 logger = logging.getLogger('TradingBot')
 trade_logger = logging.getLogger('TradeExecution')
 db_logger = logging.getLogger('Database')
 api_logger = logging.getLogger('API')
-
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
-
 import warnings
-warnings.filterwarnings('ignore')
-
+warnings.filterWarnings('ignore')
 from flask import Flask, request, jsonify
-
 # Database setup
 DB_PATH = os.environ.get('DB_PATH', 'trades.db')
-
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH, timeout=30.0)
@@ -114,7 +103,6 @@ def init_db():
         db_logger.info("Database initialized successfully")
     except Exception as e:
         db_logger.error(f"Database initialization failed: {e}")
-
 @contextmanager
 def get_db():
     conn = None
@@ -136,7 +124,6 @@ def get_db():
                 conn.close()
             except:
                 pass
-
 def log_system_event(level, component, message, details=None):
     try:
         with get_db() as conn:
@@ -154,16 +141,15 @@ def log_system_event(level, component, message, details=None):
                 ))
     except Exception as e:
         db_logger.error(f"Failed to log system event: {e}")
-
 def save_trade(trade_id, trade_data):
     try:
         with get_db() as conn:
             if conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT OR REPLACE INTO trades 
-                    (trade_id, timestamp, app_id, status, success, contract_id, profit, 
-                     final_balance, initial_balance, error, parameters, volatility, growth_rate, 
+                    INSERT OR REPLACE INTO trades
+                    (trade_id, timestamp, app_id, status, success, contract_id, profit,
+                     final_balance, initial_balance, error, parameters, volatility, growth_rate,
                      target_ticks, exit_reason, max_profit_reached, ticks_completed,
                      duration_seconds, entry_spot, exit_spot, volatility_at_exit,
                      pre_trade_volatility, growth_rate_switches, volatility_trend)
@@ -197,7 +183,6 @@ def save_trade(trade_id, trade_data):
                 db_logger.debug(f"Trade {trade_id} saved successfully")
     except Exception as e:
         db_logger.error(f"Failed to save trade {trade_id}: {e}")
-
 def get_trade(trade_id):
     try:
         with get_db() as conn:
@@ -210,7 +195,6 @@ def get_trade(trade_id):
     except Exception as e:
         db_logger.error(f"Failed to get trade {trade_id}: {e}")
     return None
-
 def get_all_trades():
     try:
         with get_db() as conn:
@@ -221,7 +205,6 @@ def get_all_trades():
     except Exception as e:
         db_logger.error(f"Failed to get all trades: {e}")
     return []
-
 def get_session_data(session_date):
     try:
         with get_db() as conn:
@@ -234,32 +217,28 @@ def get_session_data(session_date):
     except Exception as e:
         db_logger.error(f"Failed to get session data: {e}")
     return None
-
 def update_session_data(session_date, trades_count, consecutive_losses, total_profit_loss, stopped):
     try:
         with get_db() as conn:
             if conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT OR REPLACE INTO trading_sessions 
+                    INSERT OR REPLACE INTO trading_sessions
                     (session_date, trades_count, consecutive_losses, total_profit_loss, stopped, last_updated)
                     VALUES (?, ?, ?, ?, ?, ?)
-                ''', (session_date, trades_count, consecutive_losses, total_profit_loss, stopped, 
+                ''', (session_date, trades_count, consecutive_losses, total_profit_loss, stopped,
                       datetime.now().isoformat()))
                 db_logger.debug(f"Session data updated: {trades_count} trades, {consecutive_losses} losses")
     except Exception as e:
         db_logger.error(f"Failed to update session data: {e}")
-
 try:
     init_db()
 except Exception as e:
     logger.error(f"Database initialization error: {e}")
-
 trade_results = {}
 MAX_CONCURRENT_TRADES = 2
 active_trades_lock = Lock()
 active_trade_count = 0
-
 def can_start_trade():
     global active_trade_count
     try:
@@ -273,7 +252,6 @@ def can_start_trade():
     except Exception as e:
         logger.error(f"Error in can_start_trade: {e}")
         return False
-
 def trade_completed():
     global active_trade_count
     try:
@@ -282,11 +260,9 @@ def trade_completed():
             logger.info(f"Trade slot released. Active: {active_trade_count}/{MAX_CONCURRENT_TRADES}")
     except Exception as e:
         logger.error(f"Error in trade_completed: {e}")
-
-
 class VolatilityAnalyzer:
     """Advanced volatility analysis using aggressive mathematical filtering"""
-    
+   
     @staticmethod
     def calculate_standard_deviation(values):
         """Calculate standard deviation"""
@@ -295,7 +271,7 @@ class VolatilityAnalyzer:
         mean = sum(values) / len(values)
         variance = sum((x - mean) ** 2 for x in values) / len(values)
         return math.sqrt(variance)
-    
+   
     @staticmethod
     def calculate_coefficient_of_variation(values):
         """Calculate coefficient of variation (CV) - normalized volatility"""
@@ -306,39 +282,37 @@ class VolatilityAnalyzer:
             return 0
         std_dev = VolatilityAnalyzer.calculate_standard_deviation(values)
         return (std_dev / abs(mean)) * 100
-    
+   
     @staticmethod
     def calculate_atr(prices, period=14):
         """Calculate Average True Range for volatility measurement"""
         if len(prices) < period + 1:
             return 0
-        
+       
         true_ranges = []
         for i in range(1, len(prices)):
             high_low = abs(prices[i] - prices[i-1])
             true_ranges.append(high_low)
-        
+       
         if len(true_ranges) < period:
             return sum(true_ranges) / len(true_ranges) if true_ranges else 0
-        
+       
         return sum(true_ranges[-period:]) / period
-
     @staticmethod
     def calculate_tick_metrics(prices):
         """Calculate velocity and acceleration of price movements"""
         if len(prices) < 3:
             return 0, 0
-        
+       
         # Velocity: average absolute change per tick
         velocities = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
         avg_velocity = sum(velocities) / len(velocities)
-        
+       
         # Acceleration: change in velocity
         accelerations = [abs(velocities[i] - velocities[i-1]) for i in range(1, len(velocities))]
         avg_acceleration = sum(accelerations) / len(accelerations) if accelerations else 0
-        
+       
         return avg_velocity, avg_acceleration
-
     @staticmethod
     def calculate_efficiency_ratio(prices, period=10):
         if len(prices) < period:
@@ -346,114 +320,119 @@ class VolatilityAnalyzer:
         net_change = abs(prices[-1] - prices[-period])
         volatility = sum(abs(prices[i] - prices[i-1]) for i in range(len(prices)-period+1, len(prices)))
         return net_change / volatility if volatility > 0 else 0
-
     @staticmethod
     def detect_volatility_trend(prices, short_window=5, long_window=15):
         """Detect if volatility is increasing, decreasing, or stable"""
         if len(prices) < long_window:
             return "insufficient_data"
-        
+       
         recent_vol = VolatilityAnalyzer.calculate_standard_deviation(list(prices)[-short_window:])
         baseline_vol = VolatilityAnalyzer.calculate_standard_deviation(list(prices)[-long_window:])
-        
+       
         if baseline_vol == 0:
             return "stable"
-        
+       
         ratio = recent_vol / baseline_vol
-        
+       
         if ratio > 1.3:
             return "increasing"
         elif ratio < 0.7:
             return "decreasing"
         else:
             return "stable"
-    
+   
     @staticmethod
-    def is_low_volatility_window(prices, threshold=0.25):
-        """RELAXED version - more forgiving entry conditions"""
+    def calculate_directional_bias(prices, window=10):
+        if len(prices) < window + 1:
+            return 0
+        deltas = [prices[i] - prices[i-1] for i in range(len(prices) - window, len(prices))]
+        positive = sum(1 for d in deltas if d > 0)
+        negative = len(deltas) - positive
+        return positive - negative
+   
+    @staticmethod
+    def is_low_volatility_window(prices, threshold=0.20):  # Tightened from 0.25 for real accounts
+        """STRONGER version - stricter entry conditions for real accounts"""
         if len(prices) < 20:
             return False, 0, "insufficient_data"
-        
+       
         prices_list = list(prices)
         std_dev = VolatilityAnalyzer.calculate_standard_deviation(prices_list[-15:])
         cv = VolatilityAnalyzer.calculate_coefficient_of_variation(prices_list[-15:])
         trend = VolatilityAnalyzer.detect_volatility_trend(prices)
         er = VolatilityAnalyzer.calculate_efficiency_ratio(prices_list)
-        
+       
         mean_price = sum(prices_list[-15:]) / 15
         pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
-        
-        # RELAXED CONDITIONS - Much more lenient
+       
+        # STRICTER CONDITIONS for real account safety
         is_low_vol = (
-            pct_volatility < 0.28 and   # Increased from 0.25
-            trend != "increasing" and  
-            cv < 5.0 and                # Increased from 4.0
-            er < 0.75                   # Increased from 0.7
+            pct_volatility < 0.20 and  # Tightened from 0.28
+            trend != "increasing" and
+            cv < 3.5 and  # Tightened from 5.0
+            er < 0.65  # Tightened from 0.75
         )
-        
+       
         return is_low_vol, pct_volatility, trend
-
-
 class EnhancedSafetyChecks:
-    """Balanced safety verification - relaxed entry, strict abort on spikes"""
-    
+    """Stricter safety verification for real accounts - lower thresholds"""
+   
     @staticmethod
     def is_volatility_safe_for_growth_rate(volatility_pct, growth_rate):
-        """RELAXED safety matrix - more permissive thresholds"""
+        """STRICTER safety matrix for real accounts - less permissive"""
         safety_matrix = {
-            0.05: 0.22,   # 5% growth allows up to 0.20% vol (was 0.12)
-            0.04: 0.24,   # 4% growth allows up to 0.22% vol (was 0.14)
-            0.03: 0.26,   # 3% growth allows up to 0.24% vol (was 0.16)
-            0.025: 0.28,  # 2.5% growth allows up to 0.26% vol (was 0.11)
-            0.02: 0.28,   # 2% growth allows up to 0.28% vol (was 0.18)
-            0.015: 0.30,  # 1.5% growth allows up to 0.30% vol (was 0.18)
-            0.01: 0.35    # 1% growth allows up to 0.35% vol (was 0.25)
+            0.05: 0.12,  # 5% growth allows up to 0.12% vol (tightened from 0.22)
+            0.04: 0.14,  # 4% growth allows up to 0.14% vol (tightened from 0.24)
+            0.03: 0.16,  # 3% growth allows up to 0.16% vol (tightened from 0.26)
+            0.025: 0.18, # 2.5% growth allows up to 0.18% vol (tightened from 0.28)
+            0.02: 0.20,  # 2% growth allows up to 0.20% vol (tightened from 0.28)
+            0.015: 0.22, # 1.5% growth allows up to 0.22% vol (tightened from 0.30)
+            0.01: 0.25   # 1% growth allows up to 0.25% vol (tightened from 0.35)
         }
-        
-        max_volatility = 0.35  # Default fallback (was 0.25)
+       
+        max_volatility = 0.25  # Default fallback (tightened from 0.35)
         for rate_threshold, vol_threshold in sorted(safety_matrix.items(), reverse=True):
             if growth_rate >= rate_threshold:
                 max_volatility = vol_threshold
                 break
-        
+       
         is_safe = volatility_pct < max_volatility
-        
+       
         if not is_safe:
             reason = f"Volatility {volatility_pct:.4f}% too high for {growth_rate*100:.2f}% growth rate (max: {max_volatility:.4f}%)"
         else:
             reason = f"Volatility {volatility_pct:.4f}% is safe for {growth_rate*100:.2f}% growth rate (max: {max_volatility:.4f}%)"
-        
+       
         return is_safe, reason, max_volatility
-
 class DerivAccumulatorBot:
     def __init__(self, api_token, app_id, trade_id, parameters):
         self.api_token = api_token
         self.app_id = app_id
         self.trade_id = trade_id
-        self.stake_per_trade = parameters.get('stake', 5.0)
-        self.symbol = parameters.get('symbol', '1HZ10V')
-        self.mode = parameters.get('mode', 'adaptive')
-        self.fixed_growth_rate = parameters.get('growth_rate', 0.02)
-        self.fixed_target_ticks = parameters.get('target_ticks', 4)
+        self.stake_per_trade = parameters.get('stake', 1.0)  # Lowered default stake for real
+        self.symbol = parameters.get('symbol', '1HZ100V')  # Changed to higher vol index for better real performance
+        self.mode = parameters.get('mode', 'fixed')  # Changed default to fixed for consistency on real
+        self.fixed_growth_rate = parameters.get('growth_rate', 0.01)  # Conservative default for real
+        self.fixed_target_ticks = parameters.get('target_ticks', 9)  # Higher ticks for lower risk
         
-        self.max_daily_trades = parameters.get('max_daily_trades', 15)
+        self.max_daily_trades = parameters.get('max_daily_trades', 5)  # Reduced for real account safety
         self.max_consecutive_losses = parameters.get('max_consecutive_losses', 2)
-        self.daily_loss_limit_pct = parameters.get('daily_loss_limit_pct', 0.03)
+        self.daily_loss_limit_pct = parameters.get('daily_loss_limit_pct', 0.02)  # Tightened loss limit
         
-        self.profit_target_pct = parameters.get('profit_target_pct', 0.25)
-        self.stop_loss_pct = parameters.get('stop_loss_pct', 0.5)
-        self.trailing_stop_pct = parameters.get('trailing_stop_pct', 0.3)
-        
-        # RELAXED volatility parameters for entry
+        self.profit_target_pct = parameters.get('profit_target_pct', 0.15)  # Adjusted
+        self.stop_loss_pct = parameters.get('stop_loss_pct', 0.3)
+        self.trailing_stop_pct = parameters.get('trailing_stop_pct', 0.2)
+       
+        # Stricter volatility parameters for real
         self.pre_trade_volatility_check = parameters.get('pre_trade_volatility_check', True)
-        self.max_entry_volatility = parameters.get('max_entry_volatility', 0.25)  # Relaxed from 0.15
+        self.max_entry_volatility = parameters.get('max_entry_volatility', 0.20)  # Tightened from 0.25
         self.volatility_check_interval = parameters.get('volatility_check_interval', 1)
-        self.volatility_exit_threshold = parameters.get('volatility_exit_threshold', 1.5)
+        self.volatility_exit_threshold = parameters.get('volatility_exit_threshold', 1.3)  # Tightened
         
         # Dynamic growth rate switching
-        self.enable_growth_rate_switching = parameters.get('enable_growth_rate_switching', True)
+        self.enable_growth_rate_switching = parameters.get('enable_growth_rate_switching', False)  # Disabled by default for real stability
         self.growth_rate_switch_interval = parameters.get('growth_rate_switch_interval', 3)
-        
+       
         self.current_growth_rate = None
         self.growth_rate_switches = 0
         self.target_ticks = None
@@ -461,7 +440,7 @@ class DerivAccumulatorBot:
         self.initial_volatility = None
         self.pre_trade_volatility = None
         self.volatility_trend = None
-        
+       
         self.ws_urls = [
             f"wss://ws.derivws.com/websockets/v3?app_id={app_id}",
             f"wss://wscluster1.deriv.com/websockets/v3?app_id={app_id}",
@@ -474,20 +453,21 @@ class DerivAccumulatorBot:
         self.initial_balance = 0.0
         self.symbol_available = False
         self.contract_type = "ACCU"
-        
-        self.price_history = deque(maxlen=100)
+       
+        self.price_history = deque(maxlen=200)  # Increased maxlen for better analysis
         self.trade_start_time = None
         self.entry_spot = None
         self.exit_spot = None
-        
+       
         self.volatility_analyzer = VolatilityAnalyzer()
-        
+       
         trade_logger.info(f"Bot initialized - Trade ID: {trade_id}, Symbol: {self.symbol}, Mode: {self.mode}")
-        
+        trade_logger.warning("Real account mode: Using conservative settings to improve performance over demo.")
+       
     def get_next_request_id(self):
         self.request_id += 1
         return self.request_id
-        
+       
     async def connect(self, retry_count=0, max_retries=3):
         for ws_url in self.ws_urls:
             self.ws_url = ws_url
@@ -517,7 +497,7 @@ class DerivAccumulatorBot:
                         pass
                     self.ws = None
                 continue
-        
+       
         if retry_count < max_retries:
             wait_time = 10 * (2 ** retry_count)
             trade_logger.info(f"Retry {retry_count + 1}/{max_retries} in {wait_time}s")
@@ -526,26 +506,26 @@ class DerivAccumulatorBot:
         else:
             trade_logger.error("Failed to connect after all retries")
             raise Exception("Failed to connect after retries")
-    
+   
     async def authorize(self):
         if not self.api_token:
             trade_logger.error("No API token provided")
             return False
-        
+       
         try:
             auth_request = {
                 "authorize": self.api_token,
                 "req_id": self.get_next_request_id()
             }
             await self.ws.send(json.dumps(auth_request))
-            
+           
             response = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
             data = json.loads(response)
-            
+           
             if "error" in data:
                 trade_logger.error(f"Authorization error: {data['error']}")
                 return False
-            
+           
             if "authorize" in data:
                 self.account_balance = float(data['authorize']['balance'])
                 self.initial_balance = self.account_balance
@@ -554,12 +534,12 @@ class DerivAccumulatorBot:
         except Exception as e:
             trade_logger.error(f"Authorization exception: {e}")
         return False
-    
+   
     async def get_balance(self):
         try:
             balance_request = {"balance": 1, "subscribe": 0, "req_id": self.get_next_request_id()}
             response_data = await self.send_request(balance_request)
-            
+           
             if response_data and "balance" in response_data:
                 self.account_balance = float(response_data["balance"]["balance"])
                 trade_logger.debug(f"Balance updated: ${self.account_balance:.2f}")
@@ -567,8 +547,8 @@ class DerivAccumulatorBot:
         except Exception as e:
             trade_logger.error(f"Failed to get balance: {e}")
         return self.account_balance
-    
-    async def analyze_tick_volatility(self, periods=25):
+   
+    async def analyze_tick_volatility(self, periods=50):  # Increased periods for better real data analysis
         """Enhanced tick-based volatility analysis"""
         try:
             ticks_request = {
@@ -579,150 +559,155 @@ class DerivAccumulatorBot:
                 "req_id": self.get_next_request_id()
             }
             response = await self.send_request(ticks_request)
-            
+           
             if response and "history" in response:
                 prices = [float(p) for p in response["history"]["prices"]]
                 if len(prices) >= 10:
                     self.price_history.extend(prices)
-                    
+                   
                     std_dev = self.volatility_analyzer.calculate_standard_deviation(prices)
                     cv = self.volatility_analyzer.calculate_coefficient_of_variation(prices)
                     atr = self.volatility_analyzer.calculate_atr(prices)
-                    
+                   
                     mean_price = sum(prices) / len(prices)
                     pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
-                    
+                   
                     trade_logger.info(f"Tick Volatility Analysis - StdDev: {std_dev:.6f}, CV: {cv:.4f}%, ATR: {atr:.6f}, Pct: {pct_volatility:.4f}%")
-                    
+                   
                     return pct_volatility, prices
         except Exception as e:
             trade_logger.error(f"Tick volatility analysis failed: {e}")
         return None, None
-
     async def wait_for_low_volatility_window(self, max_wait_time=30, check_interval=1):
         """
         Optimized for speed and reliability.
         Reduced max_wait_time to 30s. Added fallback logic.
+        Added directional bias check for real account safety.
         """
         if not self.pre_trade_volatility_check:
             return True, 0, "disabled", "Check disabled"
-        
+       
         trade_logger.info(f"🔍 BRIEF CHECK: Monitoring conditions (Max {max_wait_time}s)")
         start_time = datetime.now()
-        
+       
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
             # Get fresh data
-            volatility, prices = await self.analyze_tick_volatility(periods=15)
+            volatility, prices = await self.analyze_tick_volatility(periods=50)  # Increased periods
             
             # If we don't have enough ticks OR volatility is extremely high (above 0.55%), abort immediately
             history_len = len(self.price_history) if hasattr(self, 'price_history') else 0
-            if history_len < 5:
+            if history_len < 10:  # Increased min ticks
                 trade_logger.warning(f"❌ ABORT: Insufficient data ({history_len} ticks). Stopping trade sequence.")
                 return False, None, None, "Insufficient tick data for safety"
-
             if volatility is None:
                 await asyncio.sleep(check_interval)
                 continue
-            
-            # Use volatility_analyzer's relaxed thresholds
+           
+            # Use volatility_analyzer's stricter thresholds
             is_low_vol, pct_vol, trend = self.volatility_analyzer.is_low_volatility_window(
-                self.price_history, 
-                threshold=0.35 # Slightly higher threshold for initial check
+                self.price_history,
+                threshold=0.20  # Tightened
             )
-            
+           
+            # Check directional bias
+            bias = self.volatility_analyzer.calculate_directional_bias(list(self.price_history))
+            bias_safe = abs(bias) <= 6  # Avoid extreme bias (e.g., 8+ up or down in last 10)
+           
             # Check if it's safe for AT LEAST 1% growth (the minimum fallback)
             is_safe_min, _, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, 0.01)
-            
-            if pct_vol > 0.60:
+           
+            if pct_vol > 0.50:  # Tightened from 0.60
                 trade_logger.warning(f"❌ ABORT: Extreme volatility detected ({pct_vol:.4f}%). Releasing trade slot.")
                 return False, pct_vol, trend, "Extreme volatility abort"
-            
+           
             # Calculate recent velocity
-            avg_velocity, _ = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-10:])
+            avg_velocity, _ = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-15:])  # Increased window
             
-            # If safe enough for minimum growth, we can proceed to Step 2 for rate selection
-            if is_safe_min and trend != "increasing" and avg_velocity < 0.035:
-                trade_logger.info(f"🚀 SNAPSHOT APPROVED: Vol {pct_vol:.4f}% | Moving to Step 2 selection...")
+            # If safe enough for minimum growth, bias ok, we can proceed
+            if is_safe_min and trend != "increasing" and avg_velocity < 0.025 and bias_safe:  # Tightened velocity <0.025 from 0.035
+                trade_logger.info(f"🚀 SNAPSHOT APPROVED: Vol {pct_vol:.4f}% | Bias: {bias} | Moving to Step 2 selection...")
                 self.pre_trade_volatility = pct_vol
                 self.volatility_trend = trend
                 return True, pct_vol, trend, "Snapshot approved for selection"
-            
+           
+            if not bias_safe:
+                trade_logger.warning(f"⚠️ Directional bias too high: {bias}")
+           
             await asyncio.sleep(check_interval)
-        
+       
         # FINAL FALLBACK: If we still haven't found a perfect window, but current vol is within reason
         if self.price_history:
-            prices = list(self.price_history)[-15:]
+            prices = list(self.price_history)[-20:]  # Increased
             std_dev = self.volatility_analyzer.calculate_standard_deviation(prices)
             mean_price = sum(prices) / len(prices)
             pct_vol = (std_dev / mean_price * 100) if mean_price > 0 else 1.0
-            
-            if pct_vol < 0.40: # Hard ceiling for fallback
+           
+            if pct_vol < 0.30:  # Tightened hard ceiling from 0.40
                 trade_logger.warning(f"⚠️ WAIT EXCEEDED: Falling back with current Vol {pct_vol:.4f}%")
                 self.pre_trade_volatility = pct_vol
                 self.volatility_trend = "stable"
                 return True, pct_vol, "stable", "Fallback snapshot"
-
         return False, None, None, "Market too volatile after brief check"
-    
+   
     def calculate_realtime_volatility(self):
         """Calculate real-time volatility from tick data"""
-        if len(self.price_history) < 5:
+        if len(self.price_history) < 10:  # Increased min
             return None
-        
-        prices = list(self.price_history)[-15:]
+       
+        prices = list(self.price_history)[-20:]  # Increased window
         mean_price = sum(prices) / len(prices)
         std_dev = self.volatility_analyzer.calculate_standard_deviation(prices)
-        
+       
         pct_volatility = (std_dev / mean_price * 100) if mean_price > 0 else 0
         return pct_volatility
-    
+   
     def select_growth_rate_for_volatility(self, volatility):
-        """Select optimal growth rate based on current volatility"""
-        if volatility < 0.06:
+        """Select optimal growth rate based on current volatility - more conservative for real"""
+        if volatility < 0.04:  # Tightened thresholds
             rate = 0.05
             tier = "Very Low"
-        elif volatility < 0.09:
+        elif volatility < 0.07:
             rate = 0.04
             tier = "Low"
-        elif volatility < 0.12:
+        elif volatility < 0.10:
             rate = 0.03
             tier = "Moderate-Low"
-        elif volatility < 0.16:
+        elif volatility < 0.13:
             rate = 0.025
             tier = "Moderate"
-        elif volatility < 0.20:
+        elif volatility < 0.16:
             rate = 0.02
             tier = "Moderate-High"
-        elif volatility < 0.25:
+        elif volatility < 0.20:
             rate = 0.015
             tier = "High"
         else:
             rate = 0.01
             tier = "Very High"
-        
+       
         return rate, tier
-    
+   
     async def select_optimal_growth_rate(self):
         """Select and verify optimal growth rate"""
         volatility, _ = await self.analyze_tick_volatility()
-        
+       
         if volatility is None:
             trade_logger.error("❌ Cannot select growth rate - no volatility data")
             return None
-        
+       
         self.volatility = volatility
         self.initial_volatility = volatility
-        
+       
         rate, tier = self.select_growth_rate_for_volatility(volatility)
-        
+       
         is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
             volatility, rate
         )
-        
+       
         if not is_safe:
             trade_logger.warning(f"⚠️ Initially selected rate {rate*100:.2f}% is NOT safe: {reason}")
-            
-            fallback_rates = [0.025, 0.02, 0.015, 0.01]
+           
+            fallback_rates = [0.02, 0.015, 0.01]  # Fewer fallbacks, lower rates
             for fallback_rate in fallback_rates:
                 is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
                     volatility, fallback_rate
@@ -735,19 +720,18 @@ class DerivAccumulatorBot:
             else:
                 trade_logger.error(f"❌ NO SAFE GROWTH RATE found for volatility {volatility:.4f}%")
                 return None
-        
+       
         trade_logger.info("=" * 80)
         trade_logger.info(f"✓ GROWTH RATE SELECTED")
-        trade_logger.info(f"   Volatility Tier: {tier}")
-        trade_logger.info(f"   Current Volatility: {volatility:.4f}%")
-        trade_logger.info(f"   Selected Growth Rate: {rate*100:.2f}%")
-        trade_logger.info(f"   Max Safe Volatility: {max_allowed:.4f}%")
+        trade_logger.info(f" Volatility Tier: {tier}")
+        trade_logger.info(f" Current Volatility: {volatility:.4f}%")
+        trade_logger.info(f" Selected Growth Rate: {rate*100:.2f}%")
+        trade_logger.info(f" Max Safe Volatility: {max_allowed:.4f}%")
         trade_logger.info("=" * 80)
-        
+       
         return rate
-
     def calculate_target_ticks(self, growth_rate):
-        """Dynamically calculate target ticks"""
+        """Dynamically calculate target ticks - adjusted for real"""
         if growth_rate >= 0.045:
             ticks = 3
         elif growth_rate >= 0.035:
@@ -760,46 +744,49 @@ class DerivAccumulatorBot:
             ticks = 7
         else:
             ticks = 9
-        
+       
+        # For real accounts, cap max ticks to reduce exposure
+        ticks = min(ticks, 7)
+       
         trade_logger.info(f"Target ticks: {ticks} for growth rate: {growth_rate*100:.2f}%")
         return ticks
-    
+   
     async def check_and_switch_growth_rate(self, tick_count, current_profit):
         """Dynamic growth rate switching with safety verification"""
         if not self.enable_growth_rate_switching:
             return False
-        
+       
         if tick_count % self.growth_rate_switch_interval != 0:
             return False
-        
+       
         current_vol = self.calculate_realtime_volatility()
         if current_vol is None:
             return False
-        
+       
         optimal_rate, tier = self.select_growth_rate_for_volatility(current_vol)
-        
+       
         is_safe, reason, max_allowed = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
             current_vol, optimal_rate
         )
-        
+       
         if not is_safe:
             trade_logger.warning(f"⚠️ Optimal rate {optimal_rate*100:.2f}% is UNSAFE")
-            
+           
             current_safe, current_reason, current_max = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
                 current_vol, self.current_growth_rate
             )
-            
+           
             if not current_safe:
                 trade_logger.error(f"🚨 CURRENT RATE ALSO UNSAFE! Volatility {current_vol:.4f}% exceeds {current_max:.4f}%")
                 return False
-            
+           
             return False
-        
+       
         vol_change_ratio = current_vol / self.initial_volatility if self.initial_volatility > 0 else 1.0
-        
+       
         should_switch = False
         switch_reason = ""
-        
+       
         if optimal_rate < self.current_growth_rate:
             should_switch = True
             switch_reason = "volatility_increased"
@@ -809,92 +796,92 @@ class DerivAccumulatorBot:
                 switch_reason = "volatility_decreased"
             else:
                 return False
-        
+       
         if should_switch and abs(optimal_rate - self.current_growth_rate) >= 0.005:
             old_rate = self.current_growth_rate
             self.current_growth_rate = optimal_rate
             self.growth_rate_switches += 1
-            
+           
             trade_logger.info("=" * 80)
             trade_logger.info(f"⚡ GROWTH RATE SWITCH #{self.growth_rate_switches}")
-            trade_logger.info(f"   Tick: {tick_count}")
-            trade_logger.info(f"   Rate: {old_rate*100:.2f}% → {optimal_rate*100:.2f}%")
-            trade_logger.info(f"   Reason: {switch_reason}")
-            trade_logger.info(f"   Profit: ${current_profit:.2f}")
+            trade_logger.info(f" Tick: {tick_count}")
+            trade_logger.info(f" Rate: {old_rate*100:.2f}% → {optimal_rate*100:.2f}%")
+            trade_logger.info(f" Reason: {switch_reason}")
+            trade_logger.info(f" Profit: ${current_profit:.2f}")
             trade_logger.info("=" * 80)
-            
-            log_system_event('INFO', 'GrowthRateSwitch', 
+           
+            log_system_event('INFO', 'GrowthRateSwitch',
                            f'Trade {self.trade_id} - Rate switched', {
                                'tick': tick_count,
                                'old_rate': old_rate,
                                'new_rate': optimal_rate,
                                'reason': switch_reason
                            })
-            
+           
             return True
-        
+       
         return False
-        
+       
     async def check_trading_conditions(self):
         today = datetime.now().date().isoformat()
         session = get_session_data(today)
-        
+       
         if not session:
             update_session_data(today, 0, 0, 0.0, 0)
             trade_logger.info("New trading session started")
             return True, "New session started"
-        
+       
         if session['stopped']:
             trade_logger.warning("Trading stopped for today")
             return False, "Trading stopped for today"
-        
+       
         if session['trades_count'] >= self.max_daily_trades:
-            update_session_data(today, session['trades_count'], 
-                              session['consecutive_losses'], 
+            update_session_data(today, session['trades_count'],
+                              session['consecutive_losses'],
                               session['total_profit_loss'], 1)
             trade_logger.warning(f"Max daily trades reached: {self.max_daily_trades}")
             return False, f"Max daily trades reached ({self.max_daily_trades})"
-        
+       
         if session['consecutive_losses'] >= self.max_consecutive_losses:
-            update_session_data(today, session['trades_count'], 
-                              session['consecutive_losses'], 
+            update_session_data(today, session['trades_count'],
+                              session['consecutive_losses'],
                               session['total_profit_loss'], 1)
             trade_logger.warning(f"Max consecutive losses reached: {self.max_consecutive_losses}")
             return False, f"Max consecutive losses reached ({self.max_consecutive_losses})"
-        
+       
         daily_loss_limit = self.initial_balance * self.daily_loss_limit_pct
         if session['total_profit_loss'] <= -daily_loss_limit:
-            update_session_data(today, session['trades_count'], 
-                              session['consecutive_losses'], 
+            update_session_data(today, session['trades_count'],
+                              session['consecutive_losses'],
                               session['total_profit_loss'], 1)
             trade_logger.warning(f"Daily loss limit reached: ${daily_loss_limit:.2f}")
             return False, f"Daily loss limit reached ({daily_loss_limit:.2f})"
-        
+       
         trade_logger.info("Trading conditions check passed")
         return True, "Trading conditions OK"
-    
+   
     def update_session_after_trade(self, profit):
         today = datetime.now().date().isoformat()
         session = get_session_data(today) or {
-            'trades_count': 0, 
-            'consecutive_losses': 0, 
+            'trades_count': 0,
+            'consecutive_losses': 0,
             'total_profit_loss': 0.0,
             'stopped': 0
         }
-        
+       
         new_trades_count = session['trades_count'] + 1
         new_total_pl = session['total_profit_loss'] + profit
-        
+       
         if profit <= 0:
             new_consecutive_losses = session['consecutive_losses'] + 1
         else:
             new_consecutive_losses = 0
-        
-        update_session_data(today, new_trades_count, new_consecutive_losses, 
+       
+        update_session_data(today, new_trades_count, new_consecutive_losses,
                           new_total_pl, session['stopped'])
-        
+       
         trade_logger.info(f"Session updated: Trades={new_trades_count}, Losses={new_consecutive_losses}, P/L=${new_total_pl:.2f}")
-    
+   
     async def validate_symbol(self):
         try:
             spec_request = {
@@ -902,14 +889,14 @@ class DerivAccumulatorBot:
                 "req_id": self.get_next_request_id()
             }
             response = await self.send_request(spec_request)
-            
+           
             if not response or "error" in response:
                 trade_logger.error(f"Symbol validation failed for {self.symbol}")
                 return False
-            
+           
             if "contracts_for" in response:
                 contracts = response["contracts_for"].get("available", [])
-                has_accu = any(c.get("contract_type") == self.contract_type for c in contracts) 
+                has_accu = any(c.get("contract_type") == self.contract_type for c in contracts)
                 if has_accu:
                     self.symbol_available = True
                     trade_logger.info(f"Symbol {self.symbol} validated successfully")
@@ -917,14 +904,14 @@ class DerivAccumulatorBot:
         except Exception as e:
             trade_logger.error(f"Symbol validation exception: {e}")
         return False
-    
+   
     async def send_request(self, request):
         req_id = self.get_next_request_id()
         request["req_id"] = req_id
-        
+       
         try:
             await self.ws.send(json.dumps(request))
-            
+           
             while True:
                 response_text = await asyncio.wait_for(self.ws.recv(), timeout=10.0)
                 data = json.loads(response_text)
@@ -935,104 +922,100 @@ class DerivAccumulatorBot:
         except Exception as e:
             trade_logger.error(f"Request failed: {e}")
         return None
-
     async def place_accumulator_trade(self):
         """
-        BALANCED VERSION:
-        - Relaxed entry conditions (easier to enter)
-        - STRICT abort on spikes during final setup (safety preserved)
+        STRICTER VERSION for real accounts:
+        - Stricter entry conditions
+        - Added directional bias check
+        - Stricter spike abort
         """
         try:
             balance = await self.get_balance()
             if balance < self.stake_per_trade:
                 trade_logger.error(f"❌ Insufficient balance: ${balance:.2f}")
                 return None, "Insufficient balance"
-            
+           
             if not self.symbol_available:
                 if not await self.validate_symbol():
                     return None, "Symbol validation failed"
-            
-            # STEP 1: Wait for acceptable volatility (relaxed)
+           
+            # STEP 1: Wait for acceptable volatility (stricter)
             trade_logger.info("🔍 STEP 1/3: Checking market conditions...")
-            can_enter, pre_vol, trend, reason = await self.wait_for_low_volatility_window(max_wait_time=15)
-            
+            can_enter, pre_vol, trend, reason = await self.wait_for_low_volatility_window(max_wait_time=20)  # Reduced wait time
+           
             if not can_enter:
                 trade_logger.error(f"🚫 SKIP: {reason}")
                 return None, f"Entry check failed: {reason}"
-            
+           
             trade_logger.info(f"✅ STEP 1 PASSED: Conditions acceptable (Vol: {pre_vol:.4f}%)")
-            
+           
             # STEP 2: Select safe growth rate
             trade_logger.info("🔍 STEP 2/3: Selecting growth rate...")
             if self.mode == 'adaptive':
                 self.current_growth_rate = await self.select_optimal_growth_rate()
-                
+               
                 if self.current_growth_rate is None:
                     trade_logger.error(f"❌ REJECTED: No safe growth rate")
                     return None, "No safe growth rate available"
-                
+               
                 self.target_ticks = self.calculate_target_ticks(self.current_growth_rate)
             else:
                 self.current_growth_rate = self.fixed_growth_rate
                 is_safe, reason, max_vol = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
                     pre_vol, self.current_growth_rate
                 )
-                
+               
                 if not is_safe:
                     trade_logger.error(f"❌ REJECTED: Fixed rate unsafe - {reason}")
                     return None, f"Fixed rate unsafe: {reason}"
-                
+               
                 self.target_ticks = self.fixed_target_ticks
-            
+           
             trade_logger.info(f"✅ STEP 2 PASSED: Growth rate {self.current_growth_rate*100:.2f}%")
-            
+           
             # STEP 3: Final spike check...
             trade_logger.info("🔍 STEP 3/3: Final spike check...")
-            
+           
             # Try to get final volatility, with retry
             final_vol, final_prices = None, None
-            for attempt in range(2):
-                final_vol, final_prices = await self.analyze_tick_volatility(periods=5)
+            for attempt in range(3):  # Increased retries
+                final_vol, final_prices = await self.analyze_tick_volatility(periods=15)
                 if final_vol is not None:
                     break
-                if attempt == 0:
-                    trade_logger.warning(f"⚠️ Volatility check retry {attempt+1}/2")
+                if attempt < 2:
+                    trade_logger.warning(f"⚠️ Volatility check retry {attempt+1}/3")
                     await asyncio.sleep(0.5)
-            
-            if final_vol is None or final_prices is None or len(final_prices) < 10:
+           
+            if final_vol is None or final_prices is None or len(final_prices) < 15:  # Increased min
                 trade_logger.warning("⚠️ Could not get final volatility - proceeding with caution using pre-vol")
-                final_vol = pre_vol  # Fallback to pre-vol
+                final_vol = pre_vol # Fallback to pre-vol
                 final_vel = 0.0
             else:
-                final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-10:])
+                final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-15:])
                 trade_logger.info(f"📊 Final check - Vol: {final_vol:.4f}%, Velocity: {final_vel:.6f}")
-            
-            vol_spike = final_vol > pre_vol * 1.60  # Increased from 1.40
-            vel_spike = final_vel > 0.035  # Increased from 0.020
-            
+           
+            vol_spike = final_vol > pre_vol * 1.30  # Tightened from 1.60
+            vel_spike = final_vel > 0.020  # Tightened from 0.035
+           
             trade_logger.info(f"🔍 Spike check - Vol spike: {vol_spike} (final: {final_vol:.4f}% vs pre: {pre_vol:.4f}%), Vel spike: {vel_spike} (vel: {final_vel:.6f})")
-            
-            # CRITICAL: Abort only if BOTH conditions indicate danger
-            if vol_spike and vel_spike:
-                trade_logger.error(f"🚨 SPIKE ABORT! Vol jumped {pre_vol:.4f}% → {final_vol:.4f}% AND velocity {final_vel:.6f} too high")
-                return None, "Spike detected during setup - trade aborted"
-            
-            # Log if one condition is elevated but not both
+           
+            # CRITICAL: Abort if EITHER condition indicates danger (stricter than before)
             if vol_spike or vel_spike:
-                trade_logger.warning(f"⚠️ Elevated condition detected but proceeding (Vol spike: {vol_spike}, Vel spike: {vel_spike})")
-            
+                trade_logger.error(f"🚨 SPIKE ABORT! Vol jumped {pre_vol:.4f}% → {final_vol:.4f}% OR velocity {final_vel:.6f} too high")
+                return None, "Spike detected during setup - trade aborted"
+           
             # Verify growth rate still safe
             is_final_safe, final_reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
                 final_vol, self.current_growth_rate
             )
-            
+           
             if not is_final_safe:
                 trade_logger.warning(f"⚠️ Final safety marginal: {final_reason} - attempting lower growth rate")
-                fallback_rate = self.current_growth_rate * 0.6  # Reduce by 40%
+                fallback_rate = self.current_growth_rate * 0.7  # Reduce by 30% (adjusted)
                 is_fallback_safe, fallback_reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
                     final_vol, fallback_rate
                 )
-                
+               
                 if is_fallback_safe:
                     trade_logger.info(f"✅ Fallback accepted: {fallback_rate*100:.2f}% growth rate")
                     self.current_growth_rate = fallback_rate
@@ -1040,17 +1023,17 @@ class DerivAccumulatorBot:
                 else:
                     trade_logger.error(f"❌ ABORT: Even fallback rate unsafe - {fallback_reason}")
                     return None, f"Safety abort: {final_reason}"
-            
+           
             trade_logger.info(f"✅ STEP 3 PASSED: No dangerous spikes detected")
-            
+           
             # ALL CHECKS PASSED
             trade_logger.info("=" * 80)
             trade_logger.info("✅ TRADE APPROVED - PLACING ORDER")
-            trade_logger.info(f"   Pre-Vol: {pre_vol:.4f}% | Final-Vol: {final_vol:.4f}%")
-            trade_logger.info(f"   Growth: {self.current_growth_rate*100:.2f}% | Ticks: {self.target_ticks}")
-            trade_logger.info(f"   Stake: ${self.stake_per_trade:.2f}")
+            trade_logger.info(f" Pre-Vol: {pre_vol:.4f}% | Final-Vol: {final_vol:.4f}%")
+            trade_logger.info(f" Growth: {self.current_growth_rate*100:.2f}% | Ticks: {self.target_ticks}")
+            trade_logger.info(f" Stake: ${self.stake_per_trade:.2f}")
             trade_logger.info("=" * 80)
-            
+           
             proposal_request = {
                 "proposal": 1,
                 "amount": self.stake_per_trade,
@@ -1060,31 +1043,30 @@ class DerivAccumulatorBot:
                 "symbol": self.symbol,
                 "growth_rate": self.current_growth_rate
             }
-            
+           
             proposal_response = await self.send_request(proposal_request)
             if not proposal_response or "error" in proposal_response:
                 trade_logger.error("❌ Proposal failed")
                 return None, "Proposal failed"
-            
+           
             proposal_id = proposal_response["proposal"]["id"]
             ask_price = proposal_response["proposal"]["ask_price"]
-            
+           
             buy_request = {"buy": proposal_id, "price": ask_price}
             buy_response = await self.send_request(buy_request)
-            
+           
             if not buy_response or "error" in buy_response:
                 trade_logger.error("❌ Buy failed")
                 return None, "Buy failed"
-            
+           
             contract_id = buy_response["buy"]["contract_id"]
             trade_logger.info(f"✅ TRADE PLACED - Contract: {contract_id}")
-            
+           
             return contract_id, None
-            
+           
         except Exception as e:
             trade_logger.error(f"❌ Exception: {e}")
             return None, str(e)
-
     async def monitor_contract(self, contract_id):
         try:
             self.trade_start_time = datetime.now()
@@ -1096,39 +1078,39 @@ class DerivAccumulatorBot:
                 "req_id": req_id
             }
             await self.ws.send(json.dumps(proposal_request))
-            
+           
             tick_count = 0
             max_profit = 0
             last_volatility_check = 0
             current_volatility = self.initial_volatility
             exit_reason = "unknown"
-            
+           
             profit_target = self.stake_per_trade * self.profit_target_pct
             stop_loss = -self.stake_per_trade * self.stop_loss_pct
-            
+           
             trade_logger.info(f"Monitoring started - Contract: {contract_id}")
-            
+           
             while True:
                 try:
                     response = await asyncio.wait_for(self.ws.recv(), timeout=30.0)
                     data = json.loads(response)
-                    
+                   
                     if "proposal_open_contract" in data:
                         contract = data["proposal_open_contract"]
-                        
+                       
                         if contract.get("entry_spot") and not self.entry_spot:
                             self.entry_spot = float(contract["entry_spot"])
                             trade_logger.info(f"Entry spot: {self.entry_spot}")
-                        
+                       
                         if contract.get("exit_tick") and not self.exit_spot:
                             self.exit_spot = float(contract["exit_tick"])
-                        
+                       
                         if contract.get("is_sold") or contract.get("status") == "sold":
                             profit = float(contract.get("profit", 0))
                             duration = (datetime.now() - self.trade_start_time).total_seconds()
-                            
+                           
                             trade_logger.info(f"Trade closed - Profit: ${profit:.2f}, Duration: {duration:.1f}s, Reason: {exit_reason}")
-                            
+                           
                             try:
                                 forget_request = {
                                     "forget": data.get("subscription", {}).get("id"),
@@ -1137,7 +1119,7 @@ class DerivAccumulatorBot:
                                 await self.ws.send(json.dumps(forget_request))
                             except:
                                 pass
-                            
+                           
                             return {
                                 "profit": profit,
                                 "status": "win" if profit > 0 else "loss",
@@ -1151,27 +1133,27 @@ class DerivAccumulatorBot:
                                 "exit_spot": self.exit_spot,
                                 "growth_rate_switches": self.growth_rate_switches
                             }
-                        
+                       
                         current_profit = float(contract.get("profit", 0))
                         max_profit = max(max_profit, current_profit)
-                        
+                       
                         if contract.get("current_spot"):
                             self.price_history.append(float(contract["current_spot"]))
-                        
+                       
                         if contract.get("entry_spot"):
                             tick_count += 1
                             trade_logger.debug(f"Tick {tick_count}: Profit=${current_profit:.2f}, Max=${max_profit:.2f}")
-                            
+                           
                             await self.check_and_switch_growth_rate(tick_count, current_profit)
-                        
+                       
                         # Volatility monitoring
                         if tick_count - last_volatility_check >= self.volatility_check_interval:
                             current_volatility = self.calculate_realtime_volatility()
                             last_volatility_check = tick_count
-                            
+                           
                             if current_volatility and self.initial_volatility:
                                 volatility_ratio = current_volatility / self.initial_volatility
-                                
+                               
                                 if volatility_ratio > self.volatility_exit_threshold:
                                     exit_reason = f"volatility_spike_{volatility_ratio:.2f}x"
                                     trade_logger.warning(f"🚨 VOLATILITY SPIKE! {volatility_ratio:.2f}x")
@@ -1182,7 +1164,7 @@ class DerivAccumulatorBot:
                                     }
                                     await self.send_request(sell_request)
                                     continue
-                        
+                       
                         # Profit target
                         if current_profit >= profit_target:
                             exit_reason = "profit_target"
@@ -1194,7 +1176,7 @@ class DerivAccumulatorBot:
                             }
                             await self.send_request(sell_request)
                             continue
-                        
+                       
                         # Stop loss
                         if current_profit <= stop_loss:
                             exit_reason = "stop_loss"
@@ -1206,7 +1188,7 @@ class DerivAccumulatorBot:
                             }
                             await self.send_request(sell_request)
                             continue
-                        
+                       
                         # Trailing stop
                         if max_profit > 0:
                             trailing_threshold = max_profit * (1 - self.trailing_stop_pct)
@@ -1220,7 +1202,7 @@ class DerivAccumulatorBot:
                                 }
                                 await self.send_request(sell_request)
                                 continue
-                        
+                       
                         # Target ticks
                         if tick_count >= self.target_ticks:
                             exit_reason = "target_ticks"
@@ -1232,12 +1214,12 @@ class DerivAccumulatorBot:
                             }
                             await self.send_request(sell_request)
                             continue
-                            
+                           
                     elif "error" in data:
                         trade_logger.error(f"Contract error: {data['error']['message']}")
                         return {
-                            "profit": 0, 
-                            "status": "error", 
+                            "profit": 0,
+                            "status": "error",
                             "error": data['error']['message'],
                             "exit_reason": "error",
                             "ticks_completed": tick_count,
@@ -1248,8 +1230,8 @@ class DerivAccumulatorBot:
                 except asyncio.TimeoutError:
                     trade_logger.error("Monitoring timeout")
                     return {
-                        "profit": 0, 
-                        "status": "error", 
+                        "profit": 0,
+                        "status": "error",
                         "error": "Timeout",
                         "exit_reason": "timeout",
                         "ticks_completed": tick_count,
@@ -1260,8 +1242,8 @@ class DerivAccumulatorBot:
         except Exception as e:
             trade_logger.error(f"Monitor exception: {e}")
             return {
-                "profit": 0, 
-                "status": "error", 
+                "profit": 0,
+                "status": "error",
                 "error": str(e),
                 "exit_reason": "monitor_failed",
                 "ticks_completed": 0,
@@ -1269,7 +1251,7 @@ class DerivAccumulatorBot:
                 "duration_seconds": 0,
                 "growth_rate_switches": 0
             }
-    
+   
     async def execute_trade_async(self):
         try:
             trade_results[self.trade_id] = {'status': 'running'}
@@ -1285,14 +1267,14 @@ class DerivAccumulatorBot:
                     'mode': self.mode
                 }
             })
-            
+           
             log_system_event('INFO', 'TradeExecution', f'Trade {self.trade_id} started', {
                 'symbol': self.symbol,
                 'stake': self.stake_per_trade
             })
-            
+           
             await self.connect()
-            
+           
             can_trade, reason = await self.check_trading_conditions()
             if not can_trade:
                 result = {
@@ -1305,7 +1287,7 @@ class DerivAccumulatorBot:
                 save_trade(self.trade_id, result)
                 trade_results[self.trade_id] = result
                 return result
-            
+           
             if not await self.validate_symbol():
                 result = {
                     "success": False,
@@ -1317,7 +1299,7 @@ class DerivAccumulatorBot:
                 save_trade(self.trade_id, result)
                 trade_results[self.trade_id] = result
                 return result
-            
+           
             contract_id, error = await self.place_accumulator_trade()
             if error:
                 result = {
@@ -1330,12 +1312,12 @@ class DerivAccumulatorBot:
                 save_trade(self.trade_id, result)
                 trade_results[self.trade_id] = result
                 return result
-            
+           
             monitor_result = await self.monitor_contract(contract_id)
             balance = await self.get_balance()
-            
+           
             self.update_session_after_trade(monitor_result.get("profit", 0))
-            
+           
             result = {
                 "success": True,
                 "trade_id": self.trade_id,
@@ -1369,7 +1351,7 @@ class DerivAccumulatorBot:
             }
             save_trade(self.trade_id, result)
             trade_results[self.trade_id] = result
-            
+           
             return result
         except Exception as e:
             trade_logger.error(f"Execute trade exception: {e}")
@@ -1390,12 +1372,11 @@ class DerivAccumulatorBot:
                 except:
                     pass
             gc.collect()
-
 def run_async_trade_in_thread(api_token, app_id, parameters, trade_id):
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+       
         bot = DerivAccumulatorBot(api_token, app_id, trade_id, parameters)
         loop.run_until_complete(bot.execute_trade_async())
         loop.close()
@@ -1404,46 +1385,43 @@ def run_async_trade_in_thread(api_token, app_id, parameters, trade_id):
     finally:
         trade_completed()
         gc.collect()
-
-
 app = Flask(__name__)
 app.logger.disabled = True
-
 @app.route('/trade/<app_id>/<api_token>', methods=['POST'])
 def execute_trade(app_id, api_token):
     try:
         if not can_start_trade():
             return jsonify({
-                "success": False, 
+                "success": False,
                 "error": "Too many concurrent trades",
                 "max_concurrent": MAX_CONCURRENT_TRADES
             }), 429
-        
+       
         data = request.get_json(silent=True) or {}
-        
+       
         parameters = {
-            'stake': float(data.get('stake', 5.0)),
-            'symbol': data.get('symbol', '1HZ10V'),
-            'mode': data.get('mode', 'adaptive'),
-            'growth_rate': float(data.get('growth_rate', 0.02)),
-            'target_ticks': int(data.get('target_ticks', 4)),
-            'max_daily_trades': int(data.get('max_daily_trades', 15)),
-            'max_consecutive_losses': int(data.get('max_consecutive_losses', 3)),
-            'daily_loss_limit_pct': float(data.get('daily_loss_limit_pct', 0.03)),
-            'profit_target_pct': float(data.get('profit_target_pct', 0.25)),
-            'stop_loss_pct': float(data.get('stop_loss_pct', 0.5)),
-            'trailing_stop_pct': float(data.get('trailing_stop_pct', 0.3)),
+            'stake': float(data.get('stake', 1.0)),  # Lowered default
+            'symbol': data.get('symbol', '1HZ100V'),  # Changed default
+            'mode': data.get('mode', 'fixed'),  # Changed default
+            'growth_rate': float(data.get('growth_rate', 0.01)),  # Conservative
+            'target_ticks': int(data.get('target_ticks', 9)),
+            'max_daily_trades': int(data.get('max_daily_trades', 5)),  # Reduced
+            'max_consecutive_losses': int(data.get('max_consecutive_losses', 2)),
+            'daily_loss_limit_pct': float(data.get('daily_loss_limit_pct', 0.02)),  # Tightened
+            'profit_target_pct': float(data.get('profit_target_pct', 0.15)),
+            'stop_loss_pct': float(data.get('stop_loss_pct', 0.3)),
+            'trailing_stop_pct': float(data.get('trailing_stop_pct', 0.2)),
             'volatility_check_interval': int(data.get('volatility_check_interval', 1)),
-            'volatility_exit_threshold': float(data.get('volatility_exit_threshold', 1.5)),
+            'volatility_exit_threshold': float(data.get('volatility_exit_threshold', 1.3)),  # Tightened
             'pre_trade_volatility_check': data.get('pre_trade_volatility_check', True),
-            'max_entry_volatility': float(data.get('max_entry_volatility', 0.25)),
-            'enable_growth_rate_switching': data.get('enable_growth_rate_switching', True),
+            'max_entry_volatility': float(data.get('max_entry_volatility', 0.20)),  # Tightened
+            'enable_growth_rate_switching': data.get('enable_growth_rate_switching', False),  # Disabled default
             'growth_rate_switch_interval': int(data.get('growth_rate_switch_interval', 3))
         }
-        
+       
         new_trade_id = str(uuid.uuid4())
         initial_data = {
-            "status": "pending", 
+            "status": "pending",
             "timestamp": datetime.now().isoformat(),
             "app_id": app_id,
             "parameters": parameters,
@@ -1451,36 +1429,33 @@ def execute_trade(app_id, api_token):
         }
         save_trade(new_trade_id, initial_data)
         trade_results[new_trade_id] = initial_data
-        
+       
         api_logger.info(f"Trade initiated - ID: {new_trade_id}")
-
         thread = Thread(
             target=run_async_trade_in_thread,
             args=(api_token, app_id, parameters, new_trade_id)
         )
         thread.daemon = True
         thread.start()
-        
+       
         return jsonify({"status": "initiated", "trade_id": new_trade_id}), 202
     except Exception as e:
         api_logger.error(f"Endpoint error: {e}")
         trade_completed()
         return jsonify({"success": False, "error": "Internal Server Error"}), 500
-
-
 @app.route('/trade/<trade_id>', methods=['GET'])
 def get_trade_result(trade_id):
     result = trade_results.get(trade_id) or get_trade(trade_id)
-    
+   
     if not result:
         return jsonify({"success": False, "error": "Trade ID not found"}), 404
-    
+   
     response = {
         "trade_id": trade_id,
         "status": result.get('status', 'unknown'),
         "timestamp": result.get('timestamp')
     }
-    
+   
     if result.get('success') is not None or result.get('success') == 1:
         profit = result.get('profit', 0)
         response.update({
@@ -1497,15 +1472,13 @@ def get_trade_result(trade_id):
             "duration_seconds": result.get('duration_seconds'),
             "error_details": result.get('error')
         })
-    
+   
     return jsonify(response), 200
-
-
 @app.route('/session', methods=['GET'])
 def get_session_status():
     today = datetime.now().date().isoformat()
     session = get_session_data(today)
-    
+   
     if not session:
         return jsonify({
             "session_date": today,
@@ -1515,7 +1488,7 @@ def get_session_status():
             "stopped": False,
             "message": "No trades today"
         }), 200
-    
+   
     return jsonify({
         "session_date": today,
         "trades_count": session['trades_count'],
@@ -1524,42 +1497,38 @@ def get_session_status():
         "stopped": bool(session['stopped']),
         "can_trade": not bool(session['stopped'])
     }), 200
-
-
 @app.route('/session/reset', methods=['POST'])
 def reset_session():
     today = datetime.now().date().isoformat()
     update_session_data(today, 0, 0, 0.0, 0)
     api_logger.info("Session reset")
     return jsonify({"message": "Session reset successfully", "date": today}), 200
-
-
 @app.route('/trades', methods=['GET'])
 def get_all_trades_endpoint():
     all_trades = get_all_trades()
     filter_by = request.args.get('filter', 'today')
-    
+   
     from datetime import date
     today = date.today()
-    
+   
     if filter_by == 'today':
         filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
     elif filter_by == 'all':
         filtered_trades = all_trades
     else:
         filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
-    
+   
     completed = [t for t in filtered_trades if t.get('status') == 'completed']
     running = [t for t in filtered_trades if t.get('status') == 'running']
-    
+   
     wins = [t for t in completed if t.get('profit', 0) > 0]
     losses = [t for t in completed if t.get('profit', 0) <= 0]
     total_profit = sum(t.get('profit', 0) for t in completed)
-    
+   
     trades_dict = {t['trade_id']: dict(t) for t in filtered_trades}
-    
+   
     win_rate = f"{(len(wins)/len(completed)*100):.2f}%" if completed else "0%"
-    
+   
     return jsonify({
         "filter": filter_by,
         "date": today.isoformat(),
@@ -1572,50 +1541,50 @@ def get_all_trades_endpoint():
         "total_profit_loss": round(total_profit, 2),
         "trades": trades_dict
     }), 200
-
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
         "status": "healthy",
-        "service": "Deriv Accumulator Bot - Balanced v4.1",
+        "service": "Deriv Accumulator Bot - Real Account Optimized v4.2",
         "timestamp": datetime.now().isoformat(),
         "active_trades": active_trade_count,
         "max_concurrent": MAX_CONCURRENT_TRADES,
-        "mode": "BALANCED",
+        "mode": "REAL_OPTIMIZED",
         "features": [
-            "✓ Relaxed entry conditions (easier to enter trades)",
-            "✓ Strict spike abort (safety preserved)",
-            "✓ Dynamic growth rate switching",
-            "✓ Real-time volatility monitoring"
+            "✓ Stricter entry conditions for real accounts",
+            "✓ Directional bias check added",
+            "✓ Conservative defaults (1% growth, 9 ticks, 1HZ100V)",
+            "✓ Tightened volatility thresholds and spike detection",
+            "✓ Reduced daily trades and loss limits"
         ]
     }), 200
-
-
 @app.route('/config/optimal', methods=['GET'])
 def get_optimal_config():
     return jsonify({
         "recommended_setup": {
-            "description": "BALANCED MODE: Relaxed entry + Strict spike abort",
+            "description": "REAL ACCOUNT MODE: Stricter checks + Conservative params",
             "parameters": {
-                "stake": 5.0,
-                "symbol": "1HZ10V",
-                "mode": "adaptive",
-                "max_entry_volatility": 0.25,
-                "enable_growth_rate_switching": True
+                "stake": 1.0,
+                "symbol": "1HZ100V",
+                "mode": "fixed",
+                "growth_rate": 0.01,
+                "target_ticks": 9,
+                "max_entry_volatility": 0.20,
+                "enable_growth_rate_switching": False
             },
             "notes": [
-                "✓ RELAXED ENTRY: Vol < 0.25%, 3 consecutive readings",
-                "✓ STRICT ABORT: Exits on spikes during final setup",
-                "✓ Allows 'decreasing' volatility trends",
-                "✓ More forgiving velocity checks"
+                "✓ STRICT ENTRY: Vol < 0.20%, directional bias check",
+                "✓ Conservative growth/ticks to survive real market conditions",
+                "✓ Higher vol index (100V) for less manipulation",
+                "✓ Disabled dynamic switching for stability",
+                "✓ Use small stakes and monitor over 100+ trades"
             ]
         }
     }), 200
-
 @app.route('/api/trades')
 def api_trades():
-    db_trades = get_all_trades() 
-    
+    db_trades = get_all_trades()
+   
     active_trades = []
     with active_trades_lock:
         for trade_id, data in trade_results.items():
@@ -1628,12 +1597,11 @@ def api_trades():
                     'profit': 0,
                     'growth_rate': data.get('growth_rate', 0)
                 })
-    
+   
     active_ids = [t.get('trade_id') for t in active_trades]
     combined_trades = active_trades + [dt for dt in db_trades if dt.get('trade_id') not in active_ids]
-    
+   
     return jsonify(combined_trades[:50])
-
 @app.route('/dashboard', methods=['GET'])
 def dashboard():
     html = """
@@ -1659,7 +1627,7 @@ def dashboard():
     <div class="max-w-6xl mx-auto">
         <header class="flex justify-between items-center mb-8 border-b border-slate-800 pb-6">
             <div>
-                <h1 class="text-xl font-bold tracking-tight">ACCUMULATOR <span class="text-blue-500 text-xs">v4.1 BALANCED</span></h1>
+                <h1 class="text-xl font-bold tracking-tight">ACCUMULATOR <span class="text-blue-500 text-xs">v4.2 REAL OPTIMIZED</span></h1>
                 <p id="sync-status" class="text-slate-500 text-xs mt-1 italic">Last update: --:--:--</p>
             </div>
             <div class="text-right">
@@ -1667,7 +1635,6 @@ def dashboard():
                 <h2 id="session-pl" class="text-2xl font-bold">$0.00</h2>
             </div>
         </header>
-
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
             <div class="glass p-5 rounded-xl">
                 <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Total Executions</p>
@@ -1686,7 +1653,6 @@ def dashboard():
                 <p id="safety-label" class="text-xl font-bold text-emerald-500">Monitoring</p>
             </div>
         </div>
-
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div class="lg:col-span-2 glass rounded-xl overflow-hidden">
                 <div class="px-6 py-4 border-b border-slate-800 bg-slate-900/50">
@@ -1708,7 +1674,6 @@ def dashboard():
                     </table>
                 </div>
             </div>
-
             <div class="space-y-6">
                 <div class="glass p-6 rounded-xl">
                     <h3 class="text-amber-500 text-xs font-bold uppercase tracking-wider mb-4">Skipped (Market Noise)</h3>
@@ -1719,7 +1684,6 @@ def dashboard():
             </div>
         </div>
     </div>
-
     <script>
         async function updateDashboard() {
             try {
@@ -1727,24 +1691,22 @@ def dashboard():
                     fetch('/api/trades'),
                     fetch('/session')
                 ]);
-                
+               
                 const trades = await tradesRes.json();
                 const session = await sessionRes.json();
-                
+               
                 renderTrades(trades);
                 updateStats(session, trades);
                 document.getElementById('sync-status').innerText = `Last update: ${new Date().toLocaleTimeString()}`;
             } catch (e) { console.error("Update failed", e); }
         }
-
         function renderTrades(trades) {
             const tbody = document.getElementById('trade-body');
             const skipLog = document.getElementById('skip-log');
             tbody.innerHTML = '';
-            
+           
             let skipHtml = '';
             let validTradesCount = 0;
-
             trades.forEach(t => {
                 // Handle skipped trades separately
                 if (t.error && (t.error.includes("Safety") || t.error.includes("unsuitable") || t.error.includes("Noise"))) {
@@ -1754,12 +1716,11 @@ def dashboard():
                     </div>`;
                     return;
                 }
-
                 validTradesCount++;
                 const isRunning = t.status === 'running';
                 const profit = parseFloat(t.profit || 0);
                 const statusClass = isRunning ? 'running' : (profit > 0 ? 'win' : 'loss');
-                
+               
                 tbody.innerHTML += `
                     <tr class="hover:bg-slate-800/20 transition">
                         <td class="px-6 py-4 text-slate-500 text-xs">${t.timestamp.split('T')[1].split('.')[0]}</td>
@@ -1774,50 +1735,47 @@ def dashboard():
                     </tr>
                 `;
             });
-
             if (skipHtml) skipLog.innerHTML = skipHtml;
             if (validTradesCount === 0) tbody.innerHTML = '<tr><td colspan="5" class="py-10 text-center text-slate-600">No active or historical trades found.</td></tr>';
         }
-
         function updateStats(session, trades) {
             const skipped = trades.filter(t => t.error && t.error.includes("Safety")).length;
             document.getElementById('stat-total').innerText = session.trades_count || 0;
             document.getElementById('stat-skipped').innerText = skipped;
             document.getElementById('session-pl').innerText = `$${parseFloat(session.total_profit_loss || 0).toFixed(2)}`;
             document.getElementById('session-pl').className = `text-2xl font-bold ${session.total_profit_loss >= 0 ? 'text-emerald-500' : 'text-red-500'}`;
-            
+           
             const wins = trades.filter(t => t.profit > 0).length;
             const rate = session.trades_count > 0 ? Math.round((wins / session.trades_count) * 100) : 0;
             document.getElementById('stat-winrate').innerText = rate + '%';
         }
-
         setInterval(updateDashboard, 5000);
         updateDashboard();
     </script>
 </body>
 </html>
-"""  
+"""
     return html, 200
-
 if __name__ == '__main__':
     logger.info("=" * 60)
-    logger.info("Starting Deriv Accumulator Bot v4.1 - BALANCED MODE")
-    logger.info("Relaxed Entry + Strict Spike Abort")
+    logger.info("Starting Deriv Accumulator Bot v4.2 - REAL ACCOUNT OPTIMIZED")
+    logger.info("Stricter checks, conservative params for better real performance")
     logger.info("=" * 60)
-    
+   
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"Server starting on port {port}")
     logger.info(f"Max concurrent trades: {MAX_CONCURRENT_TRADES}")
     logger.info("")
-    logger.info("KEY IMPROVEMENTS:")
-    logger.info("  1. ✓ RELAXED ENTRY: Vol < 0.25%, 3 consecutive readings")
-    logger.info("  2. ✓ Allows 'decreasing' volatility trends")
-    logger.info("  3. ✓ More forgiving velocity checks")
+    logger.info("KEY IMPROVEMENTS FOR REAL ACCOUNTS:")
+    logger.info(" 1. ✓ Changed default symbol to 1HZ100V (less manipulation)")
+    logger.info(" 2. ✓ Conservative defaults: 1% growth, 9 ticks, $1 stake")
+    logger.info(" 3. ✓ Added directional bias check to avoid biased setups")
+    logger.info(" 4. ✓ Tightened volatility thresholds and spike detection")
+    logger.info(" 5. ✓ Reduced max daily trades to 5, tighter loss limits")
+    logger.info(" 6. ✓ Increased history periods for better analysis")
+    logger.info(" 7. ✓ Disabled dynamic switching by default for stability")
     logger.info("")
-    logger.info("SAFETY PRESERVED:")
-    logger.info("  🛡️ STRICT spike abort during final setup check")
-    logger.info("  🛡️ Aborts if vol jumped >40% or velocity >0.020 before entry")
-    logger.info("  🛡️ Real-time volatility monitoring during trade")
+    logger.info("NOTE: Test on small real stakes over many trades. Demo != Real.")
     logger.info("")
-    
+   
     app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False, threaded=True)
