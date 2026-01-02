@@ -599,64 +599,46 @@ class DerivAccumulatorBot:
             trade_logger.error(f"Tick volatility analysis failed: {e}")
         return None, None
 
-    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=2):
-        """RELAXED VERSION - More forgiving entry conditions but still validates"""
+    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=1):
+        """ULTRA-FAST VERSION: Single 5% Growth Rate Check only"""
         if not self.pre_trade_volatility_check:
-            trade_logger.info("⚠️ Pre-trade volatility check DISABLED")
             return True, 0, "disabled", "Check disabled"
         
-        trade_logger.info(f"🔍 BALANCED MODE: Monitoring market for reasonable entry (max {max_wait_time}s)")
-        
+        trade_logger.info(f"🔍 FAST MODE: Checking 5% growth safety (max {max_wait_time}s)")
         start_time = datetime.now()
-        attempts = 0
-        consecutive_safe_readings = 0
-        required_safe_readings = 1  # Reduced from 5 to 1
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
-            attempts += 1
-            volatility, prices = await self.analyze_tick_volatility(periods=25)
+            # Reduced from 25 to 15 ticks for faster API response
+            volatility, prices = await self.analyze_tick_volatility(periods=15)
             
             if volatility is None:
-                consecutive_safe_readings = 0
                 await asyncio.sleep(check_interval)
                 continue
             
+            # PERMISSIVE SETTINGS for immediate entry
             is_low_vol, pct_vol, trend = self.volatility_analyzer.is_low_volatility_window(
                 self.price_history, 
-                threshold=self.max_entry_volatility
+                threshold=0.30 # Increased threshold for even faster entry
             )
             
-            avg_velocity, avg_acceleration = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-20:])
+            # ONLY CHECK 5% GROWTH RATE (as requested)
+            is_safe_5pct, _, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, 0.05)
             
-            test_growth_rates = [0.05, 0.03, 0.02]
-            safe_rates = [r for r in test_growth_rates if EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, r)[0]]
+            # COMBINED FAST-ENTRY LOGIC
+            # 1. Must be safe for 5% growth
+            # 2. Must not be a sharp 'increasing' spike
+            # 3. Velocity check relaxed to 0.025
+            avg_velocity, _ = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-10:])
             
-            # RELAXED entry conditions
-            is_safe_entry = (
-                is_low_vol and 
-                trend in ["stable", "decreasing"] and  # Allow decreasing volatility
-                len(safe_rates) >= 2 and               # At least 2 of 3 rates safe (was 3 of 3)
-                pct_vol < self.max_entry_volatility and 
-                avg_velocity < 0.018                    # Relaxed from 0.015
-            )
-            
-            if is_safe_entry:
-                consecutive_safe_readings += 1
-                trade_logger.info(f"✓ Good reading {consecutive_safe_readings}/{required_safe_readings} | Vol: {pct_vol:.4f}% | Velocity: {avg_velocity:.6f}")
-                if consecutive_safe_readings >= required_safe_readings:
-                    self.pre_trade_volatility = pct_vol
-                    self.volatility_trend = trend
-                    return True, pct_vol, trend, "Market conditions acceptable"
-            else:
-                if consecutive_safe_readings > 0:
-                    rejection_reason = "High noise" if not is_low_vol else "Volatility rising" if trend == "increasing" else "High velocity"
-                    trade_logger.warning(f"❌ {rejection_reason} detected - Resetting timer")
-                consecutive_safe_readings = 0
+            if is_safe_5pct and trend != "increasing" and avg_velocity < 0.025:
+                trade_logger.info(f"🚀 ENTRY APPROVED | Vol: {pct_vol:.4f}% | Velocity: {avg_velocity:.6f}")
+                self.pre_trade_volatility = pct_vol
+                self.volatility_trend = trend
+                return True, pct_vol, trend, "Fast entry approved"
             
             await asyncio.sleep(check_interval)
         
-        trade_logger.error("🚫 TIMEOUT: Could not find acceptable entry conditions within time limit")
-        return False, None, None, "Timeout waiting for entry conditions"
+        return False, None, None, "Timeout"
 
     def calculate_realtime_volatility(self):
         """Calculate real-time volatility from tick data"""
@@ -982,7 +964,7 @@ class DerivAccumulatorBot:
             
             # STEP 3: CRITICAL SPIKE ABORT CHECK (strict)
             trade_logger.info("🔍 STEP 3/3: Final spike check...")
-            final_vol, final_prices = await self.analyze_tick_volatility(periods=10)
+            final_vol, final_prices = await self.analyze_tick_volatility(periods=5)
             
             if final_vol is None:
                 return None, "Failed to get final volatility"
