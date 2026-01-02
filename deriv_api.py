@@ -385,10 +385,10 @@ class VolatilityAnalyzer:
         
         # RELAXED CONDITIONS - Much more lenient
         is_low_vol = (
-            pct_volatility < 0.25 and      # Relaxed from 0.18 to 0.25
-            trend != "increasing" and       # Allow stable AND decreasing
-            cv < 4.0 and                    # Relaxed from 3.0 to 4.0
-            er < 0.7                        # Relaxed from 0.6 to 0.7
+            pct_volatility < 0.28 and   # Increased from 0.25
+            trend != "increasing" and  
+            cv < 5.0 and                # Increased from 4.0
+            er < 0.75                   # Increased from 0.7
         )
         
         return is_low_vol, pct_volatility, trend
@@ -599,7 +599,7 @@ class DerivAccumulatorBot:
             trade_logger.error(f"Tick volatility analysis failed: {e}")
         return None, None
 
-    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=10):
+    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=5):
         """RELAXED VERSION - More forgiving entry conditions but still validates"""
         if not self.pre_trade_volatility_check:
             trade_logger.info("⚠️ Pre-trade volatility check DISABLED")
@@ -610,11 +610,11 @@ class DerivAccumulatorBot:
         start_time = datetime.now()
         attempts = 0
         consecutive_safe_readings = 0
-        required_safe_readings = 3  # Reduced from 5 to 3
+        required_safe_readings = 2  # Reduced from 5 to 3
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
             attempts += 1
-            volatility, prices = await self.analyze_tick_volatility(periods=100)
+            volatility, prices = await self.analyze_tick_volatility(periods=40)
             
             if volatility is None:
                 consecutive_safe_readings = 0
@@ -982,7 +982,7 @@ class DerivAccumulatorBot:
             
             # STEP 3: CRITICAL SPIKE ABORT CHECK (strict)
             trade_logger.info("🔍 STEP 3/3: Final spike check...")
-            final_vol, final_prices = await self.analyze_tick_volatility(periods=30)
+            final_vol, final_prices = await self.analyze_tick_volatility(periods=10)
             
             if final_vol is None:
                 return None, "Failed to get final volatility"
