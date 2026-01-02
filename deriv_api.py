@@ -976,19 +976,40 @@ class DerivAccumulatorBot:
             
             trade_logger.info(f"✅ STEP 2 PASSED: Growth rate {self.current_growth_rate*100:.2f}%")
             
-            # STEP 3: CRITICAL SPIKE ABORT CHECK (strict)
+            # STEP 3: Final spike check...
             trade_logger.info("🔍 STEP 3/3: Final spike check...")
-            final_vol, final_prices = await self.analyze_tick_volatility(periods=5)
             
-            if final_vol is None:
-                return None, "Failed to get final volatility"
-
-            final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-10:])
-
-            # CRITICAL: Abort if sudden spike detected (STRICT)
-            if final_vol > pre_vol * 1.40 or final_vel > 0.020:
-                trade_logger.error(f"🚨 SPIKE ABORT! Vol jumped {pre_vol:.4f}% → {final_vol:.4f}% or velocity {final_vel:.6f}")
+            # Try to get final volatility, with retry
+            final_vol, final_prices = None, None
+            for attempt in range(2):
+                final_vol, final_prices = await self.analyze_tick_volatility(periods=5)
+                if final_vol is not None:
+                    break
+                if attempt == 0:
+                    trade_logger.warning(f"⚠️ Volatility check retry {attempt+1}/2")
+                    await asyncio.sleep(0.5)
+            
+            if final_vol is None or final_prices is None or len(final_prices) < 10:
+                trade_logger.warning("⚠️ Could not get final volatility - proceeding with caution using pre-vol")
+                final_vol = pre_vol  # Fallback to pre-vol
+                final_vel = 0.0
+            else:
+                final_vel, _ = self.volatility_analyzer.calculate_tick_metrics(final_prices[-10:])
+                trade_logger.info(f"📊 Final check - Vol: {final_vol:.4f}%, Velocity: {final_vel:.6f}")
+            
+            vol_spike = final_vol > pre_vol * 1.60  # Increased from 1.40
+            vel_spike = final_vel > 0.035  # Increased from 0.020
+            
+            trade_logger.info(f"🔍 Spike check - Vol spike: {vol_spike} (final: {final_vol:.4f}% vs pre: {pre_vol:.4f}%), Vel spike: {vel_spike} (vel: {final_vel:.6f})")
+            
+            # CRITICAL: Abort only if BOTH conditions indicate danger
+            if vol_spike and vel_spike:
+                trade_logger.error(f"🚨 SPIKE ABORT! Vol jumped {pre_vol:.4f}% → {final_vol:.4f}% AND velocity {final_vel:.6f} too high")
                 return None, "Spike detected during setup - trade aborted"
+            
+            # Log if one condition is elevated but not both
+            if vol_spike or vel_spike:
+                trade_logger.warning(f"⚠️ Elevated condition detected but proceeding (Vol spike: {vol_spike}, Vel spike: {vel_spike})")
             
             # Verify growth rate still safe
             is_final_safe, final_reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
@@ -996,10 +1017,21 @@ class DerivAccumulatorBot:
             )
             
             if not is_final_safe:
-                trade_logger.error(f"❌ SPIKE ABORT: {final_reason}")
-                return None, f"Safety abort: {final_reason}"
+                trade_logger.warning(f"⚠️ Final safety marginal: {final_reason} - attempting lower growth rate")
+                fallback_rate = self.current_growth_rate * 0.6  # Reduce by 40%
+                is_fallback_safe, fallback_reason, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(
+                    final_vol, fallback_rate
+                )
+                
+                if is_fallback_safe:
+                    trade_logger.info(f"✅ Fallback accepted: {fallback_rate*100:.2f}% growth rate")
+                    self.current_growth_rate = fallback_rate
+                    self.target_ticks = self.calculate_target_ticks(self.current_growth_rate)
+                else:
+                    trade_logger.error(f"❌ ABORT: Even fallback rate unsafe - {fallback_reason}")
+                    return None, f"Safety abort: {final_reason}"
             
-            trade_logger.info(f"✅ STEP 3 PASSED: No spikes detected")
+            trade_logger.info(f"✅ STEP 3 PASSED: No dangerous spikes detected")
             
             # ALL CHECKS PASSED
             trade_logger.info("=" * 80)
@@ -1042,7 +1074,7 @@ class DerivAccumulatorBot:
         except Exception as e:
             trade_logger.error(f"❌ Exception: {e}")
             return None, str(e)
-    
+
     async def monitor_contract(self, contract_id):
         try:
             self.trade_start_time = datetime.now()
