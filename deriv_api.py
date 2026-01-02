@@ -42,7 +42,7 @@ db_logger = logging.getLogger('Database')
 api_logger = logging.getLogger('API')
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 import warnings
-warnings.filterWarnings('ignore')
+warnings.filterwarnings('ignore')
 from flask import Flask, request, jsonify
 # Database setup
 DB_PATH = os.environ.get('DB_PATH', 'trades.db')
