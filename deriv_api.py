@@ -568,7 +568,7 @@ class DerivAccumulatorBot:
             trade_logger.error(f"Failed to get balance: {e}")
         return self.account_balance
     
-    async def analyze_tick_volatility(self, periods=50):
+    async def analyze_tick_volatility(self, periods=25):
         """Enhanced tick-based volatility analysis"""
         try:
             ticks_request = {
@@ -599,7 +599,7 @@ class DerivAccumulatorBot:
             trade_logger.error(f"Tick volatility analysis failed: {e}")
         return None, None
 
-    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=5):
+    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=2):
         """RELAXED VERSION - More forgiving entry conditions but still validates"""
         if not self.pre_trade_volatility_check:
             trade_logger.info("⚠️ Pre-trade volatility check DISABLED")
@@ -610,11 +610,11 @@ class DerivAccumulatorBot:
         start_time = datetime.now()
         attempts = 0
         consecutive_safe_readings = 0
-        required_safe_readings = 2  # Reduced from 5 to 3
+        required_safe_readings = 1  # Reduced from 5 to 1
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
             attempts += 1
-            volatility, prices = await self.analyze_tick_volatility(periods=40)
+            volatility, prices = await self.analyze_tick_volatility(periods=25)
             
             if volatility is None:
                 consecutive_safe_readings = 0
