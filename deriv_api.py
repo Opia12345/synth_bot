@@ -1604,7 +1604,7 @@ def dashboard():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Terminal | Balanced Edition</title>
+    <title>Trading Terminal</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -1621,7 +1621,7 @@ def dashboard():
     <div class="max-w-6xl mx-auto">
         <header class="flex justify-between items-center mb-8 border-b border-slate-800 pb-6">
             <div>
-                <h1 class="text-xl font-bold tracking-tight">ACCUMULATOR <span class="text-green-500 text-xs">v4.1 BALANCED</span></h1>
+                <h1 class="text-xl font-bold tracking-tight">ACCUMULATOR <span class="text-blue-500 text-xs">v4.1 BALANCED</span></h1>
                 <p id="sync-status" class="text-slate-500 text-xs mt-1 italic">Last update: --:--:--</p>
             </div>
             <div class="text-right">
@@ -1632,41 +1632,52 @@ def dashboard():
 
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
             <div class="glass p-5 rounded-xl">
-                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Total Trades</p>
+                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Total Executions</p>
                 <p id="stat-total" class="text-xl font-bold">0</p>
             </div>
             <div class="glass p-5 rounded-xl">
                 <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Win Rate</p>
                 <p id="stat-winrate" class="text-xl font-bold">0%</p>
             </div>
-            <div class="glass p-5 rounded-xl border-l-2 border-green-500">
-                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Mode</p>
-                <p class="text-xl font-bold text-green-500">Balanced</p>
+            <div class="glass p-5 rounded-xl border-l-2 border-amber-500">
+                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Safety Skips</p>
+                <p id="stat-skipped" class="text-xl font-bold text-amber-500">0</p>
             </div>
             <div class="glass p-5 rounded-xl">
-                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Running</p>
-                <p id="stat-running" class="text-xl font-bold text-blue-500">0</p>
+                <p class="text-slate-500 text-xs font-semibold mb-1 uppercase">Safety Status</p>
+                <p id="safety-label" class="text-xl font-bold text-emerald-500">Monitoring</p>
             </div>
         </div>
 
-        <div class="glass rounded-xl overflow-hidden">
-            <div class="px-6 py-4 border-b border-slate-800 bg-slate-900/50">
-                <h3 class="font-bold text-sm">Execution Logs</h3>
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div class="lg:col-span-2 glass rounded-xl overflow-hidden">
+                <div class="px-6 py-4 border-b border-slate-800 bg-slate-900/50">
+                    <h3 class="font-bold text-sm">Execution Logs</h3>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-900/30 text-slate-500 text-[10px] uppercase">
+                            <tr>
+                                <th class="px-6 py-3">Time</th>
+                                <th class="px-6 py-3">Asset</th>
+                                <th class="px-6 py-3">Growth</th>
+                                <th class="px-6 py-3">Result</th>
+                                <th class="px-6 py-3 text-right">Profit</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trade-body" class="divide-y divide-slate-800">
+                            </tbody>
+                    </table>
+                </div>
             </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-900/30 text-slate-500 text-[10px] uppercase">
-                        <tr>
-                            <th class="px-6 py-3">Time</th>
-                            <th class="px-6 py-3">Symbol</th>
-                            <th class="px-6 py-3">Growth</th>
-                            <th class="px-6 py-3">Status</th>
-                            <th class="px-6 py-3 text-right">P/L</th>
-                        </tr>
-                    </thead>
-                    <tbody id="trade-body" class="divide-y divide-slate-800">
-                    </tbody>
-                </table>
+
+            <div class="space-y-6">
+                <div class="glass p-6 rounded-xl">
+                    <h3 class="text-amber-500 text-xs font-bold uppercase tracking-wider mb-4">Skipped (Market Noise)</h3>
+                    <div id="skip-log" class="space-y-3 max-h-[400px] overflow-y-auto pr-2 text-xs">
+                        <p class="text-slate-600 italic">No market rejections yet.</p>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -1690,9 +1701,23 @@ def dashboard():
 
         function renderTrades(trades) {
             const tbody = document.getElementById('trade-body');
+            const skipLog = document.getElementById('skip-log');
             tbody.innerHTML = '';
+            
+            let skipHtml = '';
+            let validTradesCount = 0;
 
             trades.forEach(t => {
+                // Handle skipped trades separately
+                if (t.error && (t.error.includes("Safety") || t.error.includes("unsuitable") || t.error.includes("Noise"))) {
+                    skipHtml += `<div class="p-3 border-l-2 border-amber-500 bg-amber-500/5 rounded">
+                        <span class="text-slate-500 text-[10px]">${t.timestamp.split('T')[1].split('.')[0]}</span>
+                        <p class="text-amber-200 mt-1">${t.error}</p>
+                    </div>`;
+                    return;
+                }
+
+                validTradesCount++;
                 const isRunning = t.status === 'running';
                 const profit = parseFloat(t.profit || 0);
                 const statusClass = isRunning ? 'running' : (profit > 0 ? 'win' : 'loss');
@@ -1701,24 +1726,26 @@ def dashboard():
                     <tr class="hover:bg-slate-800/20 transition">
                         <td class="px-6 py-4 text-slate-500 text-xs">${t.timestamp.split('T')[1].split('.')[0]}</td>
                         <td class="px-6 py-4 font-medium">${t.parameters?.symbol || 'R_100'}</td>
-                        <td class="px-6 py-4 text-slate-400">${((t.growth_rate || 0) * 100).toFixed(1)}%</td>
+                        <td class="px-6 py-4 text-slate-400">${(t.growth_rate * 100).toFixed(1)}%</td>
                         <td class="px-6 py-4">
                             <span class="status-badge ${statusClass}">${t.status}</span>
                         </td>
                         <td class="px-6 py-4 text-right font-bold ${profit > 0 ? 'text-emerald-500' : 'text-red-500'}">
-                            ${isRunning ? '...' : ' + profit.toFixed(2)}
+                            ${isRunning ? '...' : '$' + profit.toFixed(2)}
                         </td>
                     </tr>
                 `;
             });
 
-            if (trades.length === 0) tbody.innerHTML = '<tr><td colspan="5" class="py-10 text-center text-slate-600">No trades yet</td></tr>';
+            if (skipHtml) skipLog.innerHTML = skipHtml;
+            if (validTradesCount === 0) tbody.innerHTML = '<tr><td colspan="5" class="py-10 text-center text-slate-600">No active or historical trades found.</td></tr>';
         }
 
         function updateStats(session, trades) {
+            const skipped = trades.filter(t => t.error && t.error.includes("Safety")).length;
             document.getElementById('stat-total').innerText = session.trades_count || 0;
-            document.getElementById('stat-running').innerText = trades.filter(t => t.status === 'running').length;
-            document.getElementById('session-pl').innerText = `${parseFloat(session.total_profit_loss || 0).toFixed(2)}`;
+            document.getElementById('stat-skipped').innerText = skipped;
+            document.getElementById('session-pl').innerText = `$${parseFloat(session.total_profit_loss || 0).toFixed(2)}`;
             document.getElementById('session-pl').className = `text-2xl font-bold ${session.total_profit_loss >= 0 ? 'text-emerald-500' : 'text-red-500'}`;
             
             const wins = trades.filter(t => t.profit > 0).length;
