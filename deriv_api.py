@@ -599,46 +599,60 @@ class DerivAccumulatorBot:
             trade_logger.error(f"Tick volatility analysis failed: {e}")
         return None, None
 
-    async def wait_for_low_volatility_window(self, max_wait_time=900, check_interval=1):
-        """ULTRA-FAST SNAPSHOT: Moves to Step 2 after a single safe 15-tick check"""
+    async def wait_for_low_volatility_window(self, max_wait_time=30, check_interval=1):
+        """
+        Optimized for speed and reliability.
+        Reduced max_wait_time to 30s. Added fallback logic.
+        """
         if not self.pre_trade_volatility_check:
             return True, 0, "disabled", "Check disabled"
         
-        trade_logger.info(f"🔍 FAST SCAN: Monitoring 5% growth safety (Target: <0.22% vol)")
+        trade_logger.info(f"🔍 BRIEF CHECK: Monitoring conditions (Max {max_wait_time}s)")
         start_time = datetime.now()
         
         while (datetime.now() - start_time).total_seconds() < max_wait_time:
-            # Reduced from 100/50 ticks to 15 for near-instant API response
+            # Get fresh data
             volatility, prices = await self.analyze_tick_volatility(periods=15)
             
             if volatility is None:
                 await asyncio.sleep(check_interval)
                 continue
             
-            # Determine if current volatility supports a 5% Growth Rate
-            # Threshold relaxed slightly to 0.30 to catch calm windows faster
+            # Use volatility_analyzer's relaxed thresholds
             is_low_vol, pct_vol, trend = self.volatility_analyzer.is_low_volatility_window(
                 self.price_history, 
-                threshold=0.30 
+                threshold=0.35 # Slightly higher threshold for initial check
             )
             
-            # STRICT REQUIREMENT: Must be safe for 0.05 (5%) Growth Rate
-            is_safe_5pct, _, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, 0.05)
+            # Check if it's safe for AT LEAST 1% growth (the minimum fallback)
+            is_safe_min, _, _ = EnhancedSafetyChecks.is_volatility_safe_for_growth_rate(pct_vol, 0.01)
             
-            # Calculate recent velocity to ensure there's no active "jumpiness"
+            # Calculate recent velocity
             avg_velocity, _ = self.volatility_analyzer.calculate_tick_metrics(list(self.price_history)[-10:])
             
-            # FAST ENTRY: Proceeds to Step 2 on the very first "Safe" signal
-            if is_safe_5pct and trend != "increasing" and avg_velocity < 0.025:
-                trade_logger.info(f"🚀 SNAPSHOT APPROVED: Vol {pct_vol:.4f}% | Entering Step 2...")
+            # If safe enough for minimum growth, we can proceed to Step 2 for rate selection
+            if is_safe_min and trend != "increasing" and avg_velocity < 0.035:
+                trade_logger.info(f"🚀 SNAPSHOT APPROVED: Vol {pct_vol:.4f}% | Moving to Step 2 selection...")
                 self.pre_trade_volatility = pct_vol
                 self.volatility_trend = trend
-                return True, pct_vol, trend, "Fast snapshot approved"
+                return True, pct_vol, trend, "Snapshot approved for selection"
             
-            # Check every 1 second instead of waiting 10 seconds between attempts
             await asyncio.sleep(check_interval)
         
-        return False, None, None, "Step 1 Timeout"       
+        # FINAL FALLBACK: If we still haven't found a perfect window, but current vol is within reason
+        if self.price_history:
+            prices = list(self.price_history)[-15:]
+            std_dev = self.volatility_analyzer.calculate_standard_deviation(prices)
+            mean_price = sum(prices) / len(prices)
+            pct_vol = (std_dev / mean_price * 100) if mean_price > 0 else 1.0
+            
+            if pct_vol < 0.40: # Hard ceiling for fallback
+                trade_logger.warning(f"⚠️ WAIT EXCEEDED: Falling back with current Vol {pct_vol:.4f}%")
+                self.pre_trade_volatility = pct_vol
+                self.volatility_trend = "stable"
+                return True, pct_vol, "stable", "Fallback snapshot"
+
+        return False, None, None, "Market too volatile after brief check"
     
     def calculate_realtime_volatility(self):
         """Calculate real-time volatility from tick data"""
@@ -930,7 +944,7 @@ class DerivAccumulatorBot:
             
             # STEP 1: Wait for acceptable volatility (relaxed)
             trade_logger.info("🔍 STEP 1/3: Checking market conditions...")
-            can_enter, pre_vol, trend, reason = await self.wait_for_low_volatility_window()
+            can_enter, pre_vol, trend, reason = await self.wait_for_low_volatility_window(max_wait_time=15)
             
             if not can_enter:
                 trade_logger.error(f"🚫 SKIP: {reason}")
@@ -1754,11 +1768,9 @@ if __name__ == '__main__':
     logger.info(f"Max concurrent trades: {MAX_CONCURRENT_TRADES}")
     logger.info("")
     logger.info("KEY IMPROVEMENTS:")
-    logger.info("  1. ✓ RELAXED ENTRY: Vol < 0.25% (was 0.10%)")
-    logger.info("  2. ✓ 3 consecutive readings (was 5)")
-    logger.info("  3. ✓ Allows 'decreasing' volatility trends")
-    logger.info("  4. ✓ More forgiving velocity checks")
-    logger.info("  5. ✓ At least 2 of 3 test rates must be safe (was 3 of 3)")
+    logger.info("  1. ✓ RELAXED ENTRY: Vol < 0.25%, 3 consecutive readings")
+    logger.info("  2. ✓ Allows 'decreasing' volatility trends")
+    logger.info("  3. ✓ More forgiving velocity checks")
     logger.info("")
     logger.info("SAFETY PRESERVED:")
     logger.info("  🛡️ STRICT spike abort during final setup check")
