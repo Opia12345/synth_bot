@@ -1506,9 +1506,18 @@ def get_session_status():
             "trades_count": 0,
             "consecutive_losses": 0,
             "total_profit_loss": 0.0,
-                       "stopped": bool(session['stopped']),
-            "can_trade": not bool(session['stopped'])
+            "stopped": False,
+            "can_trade": True
         }), 200
+    
+    return jsonify({
+        "session_date": today,
+        "trades_count": session['trades_count'],
+        "consecutive_losses": session['consecutive_losses'],
+        "total_profit_loss": session['total_profit_loss'],
+        "stopped": bool(session['stopped']),
+        "can_trade": not bool(session['stopped'])
+    }), 200
 
 @app.route('/session/reset', methods=['POST'])
 def reset_session():
@@ -1519,42 +1528,63 @@ def reset_session():
 
 @app.route('/trades', methods=['GET'])
 def get_all_trades_endpoint():
-    all_trades = get_all_trades()
-    filter_by = request.args.get('filter', 'today')
-    
-    from datetime import date
-    today = date.today()
-    
-    if filter_by == 'today':
-        filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
-    elif filter_by == 'all':
-        filtered_trades = all_trades
-    else:
-        filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
-    
-    completed = [t for t in filtered_trades if t.get('status') == 'completed']
-    running = [t for t in filtered_trades if t.get('status') == 'running']
-    
-    wins = [t for t in completed if t.get('profit', 0) > 0]
-    losses = [t for t in completed if t.get('profit', 0) <= 0]
-    total_profit = sum(t.get('profit', 0) for t in completed)
-    
-    trades_dict = {t['trade_id']: dict(t) for t in filtered_trades}
-    
-    win_rate = f"{(len(wins)/len(completed)*100):.2f}%" if completed else "0%"
-    
-    return jsonify({
-        "filter": filter_by,
-        "date": today.isoformat(),
-        "total_trades": len(filtered_trades),
-        "completed_trades": len(completed),
-        "running_trades": len(running),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": win_rate,
-        "total_profit_loss": round(total_profit, 2),
-        "trades": trades_dict
-    }), 200
+    try:
+        all_trades = get_all_trades()
+        filter_by = request.args.get('filter', 'today')
+        
+        from datetime import date
+        today = date.today()
+        
+        if filter_by == 'today':
+            filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
+        elif filter_by == 'all':
+            filtered_trades = all_trades
+        else:
+            filtered_trades = [t for t in all_trades if t.get('timestamp', '').startswith(today.isoformat())]
+        
+        completed = [t for t in filtered_trades if t.get('status') == 'completed']
+        running = [t for t in filtered_trades if t.get('status') == 'running']
+        skipped = [t for t in filtered_trades if t.get('status') == 'skipped' or 
+                   (t.get('error') and ('stable' in str(t.get('error')).lower() or 
+                                       'spike' in str(t.get('error')).lower()))]
+        
+        wins = [t for t in completed if t.get('profit', 0) > 0]
+        losses = [t for t in completed if t.get('profit', 0) <= 0]
+        total_profit = sum(t.get('profit', 0) for t in completed)
+        
+        trades_dict = {t['trade_id']: dict(t) for t in filtered_trades}
+        
+        win_rate = f"{(len(wins)/len(completed)*100):.2f}%" if completed else "0%"
+        
+        return jsonify({
+            "filter": filter_by,
+            "date": today.isoformat(),
+            "total_trades": len(filtered_trades),
+            "completed_trades": len(completed),
+            "running_trades": len(running),
+            "skipped_trades": len(skipped),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": win_rate,
+            "total_profit_loss": round(total_profit, 2),
+            "trades": trades_dict
+        }), 200
+    except Exception as e:
+        api_logger.error(f"Error in get_all_trades_endpoint: {e}")
+        return jsonify({
+            "error": str(e),
+            "filter": "today",
+            "date": date.today().isoformat(),
+            "total_trades": 0,
+            "completed_trades": 0,
+            "running_trades": 0,
+            "skipped_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": "0%",
+            "total_profit_loss": 0.0,
+            "trades": {}
+        }), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
