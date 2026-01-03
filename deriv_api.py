@@ -1548,9 +1548,10 @@ def get_all_trades_endpoint():
                    (t.get('error') and ('stable' in str(t.get('error')).lower() or 
                                        'spike' in str(t.get('error')).lower()))]
         
-        wins = [t for t in completed if t.get('profit', 0) > 0]
-        losses = [t for t in completed if t.get('profit', 0) <= 0]
-        total_profit = sum(t.get('profit', 0) for t in completed)
+        # Fix: Handle None values for profit
+        wins = [t for t in completed if (t.get('profit') or 0) > 0]
+        losses = [t for t in completed if (t.get('profit') or 0) <= 0]
+        total_profit = sum((t.get('profit') or 0) for t in completed)
         
         trades_dict = {t['trade_id']: dict(t) for t in filtered_trades}
         
@@ -1571,6 +1572,8 @@ def get_all_trades_endpoint():
         }), 200
     except Exception as e:
         api_logger.error(f"Error in get_all_trades_endpoint: {e}")
+        import traceback
+        api_logger.error(traceback.format_exc())
         return jsonify({
             "error": str(e),
             "filter": "today",
@@ -1584,7 +1587,7 @@ def get_all_trades_endpoint():
             "win_rate": "0%",
             "total_profit_loss": 0.0,
             "trades": {}
-        }), 500
+        }), 200
 
 @app.route('/health', methods=['GET'])
 def health_check():
